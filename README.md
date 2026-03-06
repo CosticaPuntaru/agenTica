@@ -1,4 +1,3 @@
 # agenTica
 
-
 My agentic repo

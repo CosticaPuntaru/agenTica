@@ -1,0 +1,4 @@
+interface:
+  display_name: 'OpenSpec Concurrent Orchestration (including Legacy/Codex)'
+  short_description: 'Controlled concurrent sub-agent execution compatible with /opsx:*, /openspec:*, and /prompts:*'
+  default_prompt: 'First identify the command entry (OPSX, legacy openspec, Codex /prompts), and perform semantic mapping of legacy commands to /opsx:* if necessary; then perform dependency and conflict validation. When performing /opsx:apply, fetch pending tasks via openspec instructions and spawn a separate concurrent subagent for each independent task to implement them in parallel; keep strong dependency chains serial; aggregate and mark tasks complete sequentially; unify summaries after each round and decide on the next round.'
