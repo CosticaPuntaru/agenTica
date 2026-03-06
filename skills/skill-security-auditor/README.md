@@ -32,11 +32,12 @@ python .agents/skills/skill-security-auditor/scripts/check_ascii.py <path_to_ski
 ```
 
 **Example:**
+
 ```bash
 python .agents/skills/skill-security-auditor/scripts/check_ascii.py .agents/skills/some-untrusted-skill
 ```
 
 ### Interpreting Results
 
--   If the script outputs `Validation passed. No malicious signs found...`, the target is mostly safe.
--   If the script outputs `[WARNING]` or `[ALERT]`, **do not execute** the target code automatically. Review the flagged lines carefully to verify if it is a false positive (e.g., a legitimate use of `subprocess`) or an actual threat.
+- If the script outputs `Validation passed. No malicious signs found...`, the target is mostly safe.
+- If the script outputs `[WARNING]` or `[ALERT]`, **do not execute** the target code automatically. Review the flagged lines carefully to verify if it is a false positive (e.g., a legitimate use of `subprocess`) or an actual threat.

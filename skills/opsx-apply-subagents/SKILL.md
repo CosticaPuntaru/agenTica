@@ -90,7 +90,7 @@ Enable if any condition is met:
 
 1. **Check instructions**: Run `openspec instructions apply --change "<name>" --json` to get the list of pending tasks and required context files.
 2. **Analyze Dependencies**: Read the files listed in `contextFiles`. Analyze the pending tasks to determine which ones can be executed independently without writing to overlapping code regions.
-3. **DISPATCH SUBAGENTS (STRICTLY ONE PER TASK)**: For *every* independent task, you MUST spawn a separate subagent concurrently. 
+3. **DISPATCH SUBAGENTS (STRICTLY ONE PER TASK)**: For _every_ independent task, you MUST spawn a separate subagent concurrently.
    - **CRITICAL RULE: EXACTLY ONE SUBAGENT PER TASK.** If you have 4 independent tasks, you MUST spawn exactly 4 parallel subagents. Do not group multiple tasks into one subagent.
    - **Do not implement the code yourself.** You only coordinate.
    - Provide each subagent with the `contextFiles` and the precise instructions for its single isolated task.
