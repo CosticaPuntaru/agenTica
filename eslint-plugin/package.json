@@ -1,0 +1,37 @@
+{
+  "name": "eslint-plugin-agentica",
+  "version": "0.1.0",
+  "description": "Custom ESLint rules for AI-assisted codebases — enforces function size limits with skill-aware messages and React component complexity constraints.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "rules/"
+  ],
+  "keywords": [
+    "eslint",
+    "eslint-plugin",
+    "react",
+    "ai",
+    "agentica",
+    "complexity",
+    "max-lines",
+    "max-statements"
+  ],
+  "author": "CosticaPuntaru",
+  "license": "MIT",
+  "peerDependencies": {
+    "eslint": ">=8.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CosticaPuntaru/agenTica.git",
+    "directory": "eslint-plugin"
+  }
+}
