@@ -1,0 +1,4 @@
+# agenTica
+
+
+My agentic repo
