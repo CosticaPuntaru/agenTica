@@ -36,10 +36,7 @@ plugin.configs = {
             skipComments: true,
           },
         ],
-        'agentica/max-statements-react-component': [
-          'error',
-          { max: 10 },
-        ],
+        'agentica/max-statements-react-component': ['error', { max: 10 }],
       },
     },
   ],

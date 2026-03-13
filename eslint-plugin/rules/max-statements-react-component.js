@@ -15,7 +15,8 @@ export default {
   meta: {
     type: 'suggestion',
     docs: {
-      description: 'Enforce a maximum number of statements in a React component',
+      description:
+        'Enforce a maximum number of statements in a React component',
       recommended: false,
       url: 'https://github.com/CosticaPuntaru/agenTica/tree/main/eslint-plugin#max-statements-react-component',
     },
@@ -26,7 +27,8 @@ export default {
           max: {
             type: 'integer',
             minimum: 0,
-            description: 'Maximum number of top-level statements allowed in a component.',
+            description:
+              'Maximum number of top-level statements allowed in a component.',
           },
           message: {
             type: 'string',

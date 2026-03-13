@@ -41,7 +41,8 @@ export default {
               },
               IIFEs: {
                 type: 'boolean',
-                description: 'Also enforce the limit on immediately-invoked function expressions.',
+                description:
+                  'Also enforce the limit on immediately-invoked function expressions.',
               },
               message: {
                 type: 'string',
@@ -118,7 +119,9 @@ export default {
       return map
     }
 
-    const commentLineNumbers = getCommentLineNumbers(sourceCode.getAllComments())
+    const commentLineNumbers = getCommentLineNumbers(
+      sourceCode.getAllComments(),
+    )
 
     /**
      * Tells if a comment encompasses the entire line.
@@ -214,7 +217,8 @@ export default {
         const line = lines[i]
         if (!line) continue
         if (skipComments && commentLineNumbers.has(i + 1)) {
-          if (isFullLineComment(line, i + 1, commentLineNumbers.get(i + 1))) continue
+          if (isFullLineComment(line, i + 1, commentLineNumbers.get(i + 1)))
+            continue
         }
         if (skipBlankLines && /^\s*$/u.test(line)) continue
         lineCount++
@@ -228,7 +232,13 @@ export default {
         context.report({
           node,
           messageId: 'exceedCustom',
-          data: { customMessage: interpolate(customMessage, { name, lineCount, maxLines }) },
+          data: {
+            customMessage: interpolate(customMessage, {
+              name,
+              lineCount,
+              maxLines,
+            }),
+          },
         })
       } else {
         context.report({

@@ -26,9 +26,7 @@ pnpm add -D eslint-plugin-agentica
 // eslint.config.js
 import agentica from 'eslint-plugin-agentica'
 
-export default [
-  ...agentica.configs.recommended,
-]
+export default [...agentica.configs.recommended]
 ```
 
 The `recommended` preset uses sensible defaults with **no project-specific
@@ -53,7 +51,6 @@ export default [
     plugins: { agentica },
     files: ['**/*.tsx'],
     rules: {
-
       /**
        * Flag functions over 300 meaningful lines.
        * Template variables: {{name}}, {{lineCount}}, {{maxLines}}
@@ -85,7 +82,6 @@ export default [
             '  skill react-doctor',
         },
       ],
-
     },
   },
 ]
@@ -122,15 +118,16 @@ message:
 
 An enhanced version of ESLint's built-in [`max-lines-per-function`](https://eslint.org/docs/rules/max-lines-per-function) rule.
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `max` | `number` | `50` | Maximum allowed lines per function |
-| `skipBlankLines` | `boolean` | `false` | Ignore blank lines when counting |
-| `skipComments` | `boolean` | `false` | Ignore full-line comments when counting |
-| `IIFEs` | `boolean` | `false` | Also check immediately-invoked function expressions |
-| `message` | `string` | *(generic)* | Custom error message. Supports `{{name}}`, `{{lineCount}}`, `{{maxLines}}` |
+| Option           | Type      | Default     | Description                                                                |
+| ---------------- | --------- | ----------- | -------------------------------------------------------------------------- |
+| `max`            | `number`  | `50`        | Maximum allowed lines per function                                         |
+| `skipBlankLines` | `boolean` | `false`     | Ignore blank lines when counting                                           |
+| `skipComments`   | `boolean` | `false`     | Ignore full-line comments when counting                                    |
+| `IIFEs`          | `boolean` | `false`     | Also check immediately-invoked function expressions                        |
+| `message`        | `string`  | _(generic)_ | Custom error message. Supports `{{name}}`, `{{lineCount}}`, `{{maxLines}}` |
 
 **Default message:**
+
 ```
 Arrow function 'MyComponent' has too many lines (320). Maximum allowed is 300.
 ```
@@ -142,12 +139,13 @@ Arrow function 'MyComponent' has too many lines (320). Maximum allowed is 300.
 Applies a statement limit exclusively to React components (identified by
 **PascalCase** naming). Encourages moving logic into custom hooks.
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `max` | `number` | `10` | Maximum number of top-level statements allowed in a component |
-| `message` | `string` | *(generic)* | Custom error message. Supports `{{name}}`, `{{count}}`, `{{max}}` |
+| Option    | Type     | Default     | Description                                                       |
+| --------- | -------- | ----------- | ----------------------------------------------------------------- |
+| `max`     | `number` | `10`        | Maximum number of top-level statements allowed in a component     |
+| `message` | `string` | _(generic)_ | Custom error message. Supports `{{name}}`, `{{count}}`, `{{max}}` |
 
 **Default message:**
+
 ```
 MyModal has too many statements (14). Maximum allowed is 10.
 This is a React component and should be kept small.
