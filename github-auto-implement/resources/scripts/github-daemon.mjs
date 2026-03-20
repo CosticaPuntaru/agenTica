@@ -1024,7 +1024,7 @@ async function main() {
   enableSleepPrevention()
   log('\u2501\u2501\u2501 GitHub daemon started \u2501\u2501\u2501')
   log(`Poll: every ${CONFIG.POLL_INTERVAL_MS / 1000}s`)
-  log(`Agents: ${CONFIG.agents.map((a) => a.COMMAND).join(', ')}`)
+  log(`Agents: ${Object.values(CONFIG.agents).map((a) => a.COMMAND).join(', ')}`)
   log(`Repo: ${ROOT}`)
   log(`Logs: ${CONFIG.LOG_FILE}`)
   log('Press Ctrl-C to stop.')
