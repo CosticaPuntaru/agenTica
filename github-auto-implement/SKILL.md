@@ -1,8 +1,6 @@
 ---
 name: github-auto-implement
-description: >
-  Automatically picks the next GitHub issue, triages it, implements it using TDD, and opens a PR. 
-  Integrates mattpocock-skills for robust automated development.
+description: Autonomous GitHub issue implementation — picks the next ready issue, triages it, implements with TDD, and opens a PR targeting the correct branch (default, epic feature branch, or PR-chained dependency branch). Use when running the autobot daemon, implementing GitHub issues autonomously, or starting the auto-implement loop.
 metadata:
   author: CosticaPuntaru
   version: '2.0'

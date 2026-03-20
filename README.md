@@ -26,7 +26,7 @@ An end-to-end pipeline for planning large features (Epics) and generating their 
 A polling daemon that autonomously picks `autobot:ready` GitHub issues, triages them, implements them with TDD, and opens PRs — handling both one-off tickets and full epic chains.
 
 - **Install**: `npx skills add CosticaPuntaru/agenTica@github-auto-implement`
-- **Start daemon**: `node skills/github-auto-implement/resources/scripts/github-daemon.mjs`
+- **Start daemon**: `node github-auto-implement/resources/scripts/github-daemon.mjs`
 - **How it works**:
   - Polls every 5 min for issues labeled `autobot:ready`
   - Skips blocked issues (unless the blocker already has an open PR — enabling PR chaining)

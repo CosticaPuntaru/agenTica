@@ -1,6 +1,6 @@
 ---
 name: epic-workflow
-description: A comprehensive workflow for research, domain alignment, and multi-phase implementation planning from discovery to GitHub Issue creation. Optimized for generating linked GitHub issues starting with a conceptual grill.
+description: End-to-end Epic planning — grill requirements, write a PRD, decompose into GitHub issues with dependencies, and create a feature branch for autonomous implementation. Use when starting a new epic, planning a large feature, or when user says "epic workflow", "plan this feature", or "start a new epic".
 metadata:
   author: CosticaPuntaru
   version: '2.2'

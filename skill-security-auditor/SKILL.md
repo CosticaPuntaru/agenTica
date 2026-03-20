@@ -1,6 +1,6 @@
 ---
 name: skill-security-auditor
-description: Validates other skills or scripts for suspicious invisible or non-standard ASCII characters, prompt injections, and obfuscated malware payloads.
+description: Validates skills and scripts for invisible/non-standard Unicode characters, prompt injections, and obfuscated malware payloads. Use when installing a third-party skill, auditing an untrusted script, or when asked to validate skill security.
 ---
 
 # Skill Security Auditor
