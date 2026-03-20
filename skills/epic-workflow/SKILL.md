@@ -46,7 +46,7 @@ Long-running workflows like Epics can exceed the model's context window. To main
 ### Phase 3: Formalizing the PRD
 6. **Draft the PRD**
    - **Command**: `/write-a-prd` 
-   - **REQUIRED TEMPLATE**: `.github/ISSUE_TEMPLATE/prd.md`
+   - **REQUIRED TEMPLATE**: `resources/prd.md`
    - **Guardrail (Recursive Grill)**: If the agent encounters a significant unresolved dependency or technical gap during drafting, they **MUST re-trigger a mini-grill** focused on that specific gap before proceeding.
 
 ### Phase 4: Planning & Decomposition
@@ -58,12 +58,12 @@ Long-running workflows like Epics can exceed the model's context window. To main
    - **Tool**: `gh issue create`.
    - **BLOCKING ACTION**: You MUST capture the resulting **Issue Number** (e.g., `#123`). This number is required for linking all subsequent tasks.
 10. **Create Task Issues**
-    - **Template**: `.github/ISSUE_TEMPLATE/prd-task.md`.
+    - **Template**: `resources/prd-task.md`.
     - **Mandatory Linking**: Every task body MUST reference the parent PRD issue number (e.g., "Parent PRD: #123").
 
 ## Guardrails
 
 - **CRITICAL: Start with Research-Backed Grill**. Proactively read the codebase to answer questions before asking the user.
-- **Strict Templating**: The PRD MUST follow the local `.github/ISSUE_TEMPLATE/prd.md` structure exactly.
+- **Strict Templating**: The PRD MUST follow the bundled `resources/prd.md` structure exactly.
 - **Tracer Bullets**: Slices must be functional vertical slices—never horizontal/layer implementation tasks.
 - **Sequential Linking**: Create and link the Parent PRD issue first before creating ANY task issues.
