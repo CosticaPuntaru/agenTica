@@ -45,6 +45,20 @@ export default {
   },
 
   /**
+   * Return the skill/instructions string for a given issue.
+   * Receives the full issue object — use labels, title, body, etc. to pick the right skill.
+   * Return null/undefined to fall back to the default SKILL.md.
+   * @param {Object} issue - The GitHub issue object ({ number, title, body, labels, url, ... })
+   * @returns {string|null} - Skill markdown content, or null to use the default.
+   */
+  // GET_SKILL: (issue) => {
+  //   const labels = issue.labels?.map((l) => l.name) ?? []
+  //   if (labels.includes('type:bug')) return readFileSync('./skills/bugfix.md', 'utf8')
+  //   if (labels.includes('type:feature')) return readFileSync('./skills/feature.md', 'utf8')
+  //   return null // fall back to default SKILL.md
+  // },
+
+  /**
    * Blocker detection logic.
    * Return true if the issue should be skipped due to blockers.
    * Allows PR chaining: a blocked issue can start if the blocker already has an open PR.

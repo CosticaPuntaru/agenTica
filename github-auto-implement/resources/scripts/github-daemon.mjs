@@ -78,8 +78,13 @@ async function loadConfig() {
       }
       return defaultBranch
     },
+    GET_SKILL: null, // Set by config merge below once SKILL_FILE is resolved
     LOG_FILE: resolve(ROOT, 'tmp/github-daemon.log'),
   }
+
+  // Default GET_SKILL reads the SKILL_FILE (can be overridden in .agenTica.js)
+  defaults.GET_SKILL = (_issue) =>
+    existsSync(defaults.SKILL_FILE) ? readFileSync(defaults.SKILL_FILE, 'utf8') : ''
 
   const pwdConfigPath = resolve(process.cwd(), '.agenTica.js')
   const rootConfigPath = resolve(ROOT, '.agenTica.js')
@@ -557,11 +562,7 @@ git push origin ${branch}
 
 ### 7. Output
 
-As the **very last line**, print:
-
-\\\`\\\`\\\`
-PR_URL: ${pr.url}
-\\\`\\\`\\\`
+Print \`DONE\` as the very last line.
 
 ---
 
@@ -582,7 +583,7 @@ ${prContext}
 }
 
 function buildPrompt(issue, branch, baseBranch, defaultBranch) {
-  const skill = existsSync(CONFIG.SKILL_FILE) ? readFileSync(CONFIG.SKILL_FILE, 'utf8') : ''
+  const skill = CONFIG.GET_SKILL(issue) ?? ''
   const instructions = skill
     .replace(/^---[\s\S]*?---\n/, '')
     .replaceAll('{{BRANCH_NAME}}', branch)
@@ -709,8 +710,21 @@ function spawnClaude(prompt) {
   })
 }
 
-function parsePrUrl(output) {
-  return output.match(/PR_URL:\s*(https:\/\/github\.com\/\S+)/m)?.[1] ?? null
+function readPrMeta() {
+  const metaPath = resolve(ROOT, 'tmp/pr-meta.json')
+  try {
+    if (!existsSync(metaPath)) return null
+    return JSON.parse(readFileSync(metaPath, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+function cleanPrMeta() {
+  const metaPath = resolve(ROOT, 'tmp/pr-meta.json')
+  try {
+    if (existsSync(metaPath)) unlinkSync(metaPath)
+  } catch {}
 }
 
 // ── Label validation ──────────────────────────────────────────────────────────
@@ -803,7 +817,10 @@ async function tick() {
     )
   }
 
-  // 7. Run claude
+  // 7. Clean up any stale pr-meta from a previous run
+  cleanPrMeta()
+
+  // 8. Run claude
   let output = ''
 
   try {
@@ -824,30 +841,53 @@ async function tick() {
     return
   }
 
-  // 8. Extract PR URL, check for clarification, post comment
-  const prUrl = parsePrUrl(output)
-
+  // 9. Check for clarification request
   if (output.includes('CLARIFICATION_REQUESTED')) {
     log('Clarification needed \u2014 swapping to question.')
     await swapLabels(issue.number, CONFIG.LABELS.inProgress, CONFIG.LABELS.question)
-  } else if (prUrl) {
-    log(`PR URL: ${prUrl}`)
-    if (!isRevision) {
-      await addComment(issue.number, `\ud83e\udd16 **PR opened:** ${prUrl}`)
-    } else {
+    return
+  }
+
+  // 10. Post-run: create PR (new issues) or just swap label (revisions)
+  if (!isRevision) {
+    const meta = readPrMeta()
+    if (!meta) {
+      log('WARNING: tmp/pr-meta.json not found after Claude run.')
       await addComment(
         issue.number,
-        `\ud83e\udd16 **PR updated with review fixes:** ${prUrl}`,
+        `\ud83e\udd16 Implementation complete but PR metadata file not found.\nBranch: \`${branch}\``,
       )
+      return
     }
-    await swapLabels(issue.number, CONFIG.LABELS.inProgress, CONFIG.LABELS.inReview)
-    log(`${isRevision ? 'Updated' : 'Attached'} PR to #${issue.number}.`)
-  } else {
-    log('WARNING: No PR_URL found in claude output.')
-    await addComment(
-      issue.number,
-      `\ud83e\udd16 Implementation complete but no PR URL detected.\nBranch: \`${branch}\``,
+
+    const bodyPath = resolve(ROOT, 'tmp/pr-body.md')
+    writeFileSync(bodyPath, meta.body ?? '', 'utf8')
+
+    log(`Creating PR: ${meta.title}`)
+    const prResult = gh(
+      `pr create --base ${baseBranch} --head ${branch} --title ${JSON.stringify(meta.title)} --body-file ${bodyPath}`,
+      false,
     )
+    cleanPrMeta()
+    try { unlinkSync(bodyPath) } catch {}
+
+    // gh pr create outputs the PR URL to stdout when --json is not used
+    const prUrl = typeof prResult === 'string' ? prResult.trim() : null
+    if (!prUrl) {
+      log('WARNING: gh pr create returned no URL.')
+      await addComment(issue.number, `\ud83e\udd16 PR may have been created but URL could not be confirmed.\nBranch: \`${branch}\``)
+      return
+    }
+
+    log(`PR URL: ${prUrl}`)
+    await addComment(issue.number, `\ud83e\udd16 **PR opened:** ${prUrl}`)
+    await swapLabels(issue.number, CONFIG.LABELS.inProgress, CONFIG.LABELS.inReview)
+    log(`Attached PR to #${issue.number}.`)
+  } else {
+    // Revision: PR already exists, just swap label
+    await addComment(issue.number, `\ud83e\udd16 **PR updated with review fixes:** ${existingPR.url}`)
+    await swapLabels(issue.number, CONFIG.LABELS.inProgress, CONFIG.LABELS.inReview)
+    log(`Updated PR #${existingPR.number} for #${issue.number}.`)
   }
 
   log(`Done: #${issue.number} \u2014 ${issue.title}`)

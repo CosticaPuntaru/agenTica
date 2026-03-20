@@ -70,20 +70,23 @@ Ensure the implementation meets project standards.
 - **Skill**: `post-task-validation` (and `react-doctor` if applicable).
 - **Action**: Run full validation (linting, type-checking, and all smoke tests). Fix any regressions autonomously.
 
-## Step 6: Documentation & PR Submission
+## Step 6: Documentation & PR Metadata
 
 1. **Commit**: `git commit -m "Fixes #{{ISSUE_ID}}: {{ISSUE_TITLE}}"`
 2. **Push**: `git push -u origin {{BRANCH_NAME}}`
-3. **PR**: Create a PR targeting `{{BASE_BRANCH}}` — **never hardcode `main`**:
-   ```bash
-   gh pr create --base {{BASE_BRANCH}} --title "Fixes #{{ISSUE_ID}}: {{ISSUE_TITLE}}" --body "..."
+3. **Write PR metadata** to `./tmp/pr-meta.json` (the daemon will create the PR):
+   ```json
+   {
+     "title": "Fixes #{{ISSUE_ID}}: {{ISSUE_TITLE}} [#{{ISSUE_ID}}]",
+     "body": "<markdown body referencing triage notes, TDD results, and including 'Fixes #{{ISSUE_ID}}'>"
+   }
    ```
-   - **PR Title**: Must include `[#{{ISSUE_ID}}]` so the daemon can locate it for dependent tasks. e.g., `"Fixes #{{ISSUE_ID}}: {{ISSUE_TITLE}} [#{{ISSUE_ID}}]"`.
-   - **PR Body**: Reference the triage notes and the TDD results. Include `Fixes #{{ISSUE_ID}}` so GitHub cross-references the issue.
+   - **Title**: Must include `[#{{ISSUE_ID}}]` so the daemon can locate it for dependent tasks.
+   - **Body**: Reference the triage notes and TDD results. Include `Fixes #{{ISSUE_ID}}` so GitHub cross-references the issue.
 
 ## Step 7: Final Status
 
-Print the PR URL as the final output.
+Print `DONE` as the very last line of output.
 
 ## Guardrails
 
