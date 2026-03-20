@@ -640,22 +640,25 @@ ${prContext}
 }
 
 function buildPrompt(agent, issue, branch, baseBranch, defaultBranch) {
-  let skill = agent.prompt || ''
-
-  if (!skill && agent.promptFile) {
+  let workflow = ''
+  if (agent.promptFile) {
     const fpath = resolve(ROOT, agent.promptFile)
     if (existsSync(fpath)) {
-      skill = readFileSync(fpath, 'utf8')
+      workflow = readFileSync(fpath, 'utf8')
     } else {
       log(`WARNING: promptFile not found: ${fpath}`)
     }
   }
 
-  if (!skill) {
-    skill = agent.GET_SKILL(agent, issue) ?? ''
+  if (!workflow) {
+    workflow = agent.GET_SKILL(agent, issue) ?? ''
   }
-  const instructions = skill
-    .replace(/^---[\s\S]*?---\n/, '')
+
+  const persona = agent.prompt ? `## Persona\n${agent.prompt}\n\n` : ''
+  const skill = workflow.replace(/^---[\s\S]*?---\n/, '')
+  const combined = `${persona}${skill}`
+
+  const instructions = combined
     .replaceAll('{{BRANCH_NAME}}', branch)
     .replaceAll('{{BASE_BRANCH}}', baseBranch)
     .replaceAll('{{ISSUE_ID}}', String(issue.number))
@@ -914,7 +917,7 @@ async function tick() {
 
       if (output.includes('CLARIFICATION_REQUESTED')) {
         log('Clarification needed \u2014 swapping to question.')
-        await swapLabels(issue.number, labels.inProgress, labels.question)
+        await swapLabels(issue.number, [labels.inProgress, labels.ready], labels.question)
       } else if (!isRevision) {
         // Create PR
         const meta = readPrMeta()
@@ -922,10 +925,28 @@ async function tick() {
           log('WARNING: tmp/pr-meta.json not found.')
           await addComment(issue.number, '🤖 Implementation complete but PR metadata file not found.\nBranch: `' + branch + '`')
         } else {
+          // Verify everything is committed and pushed
+          try {
+            const status = execSync('git status --porcelain', { cwd: ROOT, encoding: 'utf8' }).trim()
+            if (status) {
+              log('WARNING: Uncommitted changes detected after implementation.')
+              await addComment(issue.number, `🤖 **Implementation finished with uncommitted changes.** The agent might have missed some files. Branch: \`${branch}\``)
+            }
+            // Ensure branch is pushed even if the agent forgot
+            log(`Ensuring push for branch ${branch}...`)
+            execSync(`git push origin ${branch}`, { cwd: ROOT, stdio: 'ignore' })
+          } catch {}
+
           const bodyPath = resolve(ROOT, 'tmp/pr-body.md')
-          writeFileSync(bodyPath, meta.body ?? '', 'utf8')
+          let body = meta.body ?? ''
+          if (body && !body.includes(`#${issue.number}`)) {
+            body += `\n\nFixes #${issue.number}`
+          }
+          writeFileSync(bodyPath, body, 'utf8')
           log(`Creating PR: ${meta.title}`)
-          const prResult = gh(`pr create --base ${baseBranch} --head ${branch} --title ${JSON.stringify(meta.title)} --body-file ${bodyPath}`, false)
+          
+          const safeTitle = (meta.title || '').replace(/"/g, '\\"')
+          const prResult = gh(`pr create --base ${baseBranch} --head ${branch} --title "${safeTitle}" --body-file ${bodyPath}`, false)
           cleanPrMeta()
           try { unlinkSync(bodyPath) } catch {}
           const prUrl = typeof prResult === 'string' ? prResult.trim() : null
@@ -953,7 +974,7 @@ async function tick() {
         continue
       }
       // Ultimate failure
-      await swapLabels(issue.number, labels.inProgress, labels.fixme)
+      await swapLabels(issue.number, [labels.inProgress, labels.ready], labels.fixme)
       const details = err.stderr ? `\n\n\`\`\`\n${err.stderr}\n\`\`\`` : ''
       await addComment(issue.number, `🤖 **All agents failed** \u2014 marked as fixme.\n\nError from last attempt (${agent.COMMAND}): ${err.message}${details}`)
     }
