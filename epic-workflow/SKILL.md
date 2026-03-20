@@ -39,24 +39,26 @@ Long-running workflows like Epics can exceed the model's context window. To main
    - **Action**: Save all resolved branches and user decisions to `.agents/epics/<name>/context/grill-summary.md`.
 
 ### Phase 2: Domain Alignment
-5. **Establish Ubiquitous Language**
-   - **Skill**: `ubiquitous-language`.
-   - **Goal**: Define canonical terms in `UBIQUITOUS_LANGUAGE.md`.
+5.  **Establish Ubiquitous Language**
+    - **Skill**: `ubiquitous-language`.
+    - **Goal**: Define canonical terms in `UBIQUITOUS_LANGUAGE.md`.
 
 ### Phase 3: Formalizing the PRD
-6. **Draft the PRD**
-   - **Command**: `/write-a-prd` 
-   - **REQUIRED TEMPLATE**: `resources/prd.md`
-   - **Guardrail (Recursive Grill)**: If the agent encounters a significant unresolved dependency or technical gap during drafting, they **MUST re-trigger a mini-grill** focused on that specific gap before proceeding.
+6.  **Draft the PRD**
+    - **Command**: `/write-a-prd`
+    - **REQUIRED TEMPLATE**: `resources/prd.md`
+    - **User Presentation & Review**: After drafting, **PRESENT the PRD content in full to the user**. Explicitly ask for their review and if they would like to make any edits before it is pushed to GitHub. Do NOT proceed to Phase 4 until the user has confirmed they are happy with the PRD.
+    - **Guardrail (Recursive Grill)**: If the agent encounters a significant unresolved dependency or technical gap during drafting, they **MUST re-trigger a mini-grill** focused on that specific gap before proceeding.
 
 ### Phase 4: Planning & Decomposition
-7. **Phase-Level Planning**: Use `prd-to-plan`.
-8. **Issue Decomposition**: Use `prd-to-issues`.
+7.  **Phase-Level Planning**: Use `prd-to-plan`.
+8.  **Issue Decomposition**: Use `prd-to-issues`.
 
 ### Phase 5: GitHub Issue Creation (Synchronous)
-9. **Create the Parent Epic (PRD Issue)**
-   - **Tool**: `gh issue create --title "PRD: <epic-title>" --body "$(cat prd.md)" --label "prd,enhancement"`.
-   - **BLOCKING ACTION**: You MUST capture the resulting **Issue Number** (e.g., `#123`). This number is required for everything below.
+9.  **Create the Parent Epic (PRD Issue)**
+    - **Pre-flight Check**: Ensure the user has approved the final PRD from Phase 3.
+    - **Tool**: `gh issue create --title "PRD: <epic-title>" --body "$(cat prd.md)" --label "prd,enhancement"`.
+    - **BLOCKING ACTION**: You MUST capture the resulting **Issue Number** (e.g., `#123`). This number is required for everything below.
 
 10. **Create the Epic Feature Branch**
     - **IMMEDIATELY** after capturing the PRD issue number, create and push the feature branch:
@@ -70,6 +72,7 @@ Long-running workflows like Epics can exceed the model's context window. To main
 
 11. **Create Task Issues**
     - **Template**: `resources/prd-task.md`.
+    - **Review Cycle**: BEFORE creating ANY task issues on GitHub, **PRESENT a summary table of all planned issues** (Title, Blocked by, and brief description) to the user. Wait for their explicit confirmation before proceeding with tool calls.
     - **Mandatory fields in every task body**:
       - `Parent PRD: #123` — used by the daemon to locate the epic feature branch.
       - `Blocked by: #<dep-issue>` — for tasks that depend on another task. Tasks with no cross-task dependency should write `Blocked by: None`.
