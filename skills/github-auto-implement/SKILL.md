@@ -37,15 +37,28 @@ gh issue list --search 'is:open is:issue label:autobot:ready -label:autobot:ques
 
 ## Step 2: Branch Initialization
 
-1. Create a branch: `claude/<issue-number>-<slug>`.
-2. Checkout the default branch and branch off.
+1. Checkout `{{BASE_BRANCH}}` and pull the latest:
+   ```bash
+   git fetch origin
+   git checkout {{BASE_BRANCH}}
+   git pull origin {{BASE_BRANCH}}
+   ```
+2. Create a new branch off `{{BASE_BRANCH}}`:
+   ```bash
+   git checkout -b {{BRANCH_NAME}}
+   ```
+
+> **Epic & dependency context**: `{{BASE_BRANCH}}` is resolved by the daemon before this skill runs.
+> - For one-off tickets: `{{BASE_BRANCH}}` = the repo default branch (`main`).
+> - For epic tasks with `Parent PRD: #N`: `{{BASE_BRANCH}}` = `epic/<N>-<slug>` (the epic feature branch).
+> - For tasks with `Blocked by: #N`: `{{BASE_BRANCH}}` = the blocking issue's open PR branch (PR chaining).
 
 ## Step 3: Triage & Investigation (Investigation Phase)
 
 Instead of jumping into code, investigate the issue formally.
 - **Skill**: `triage-issue`
 - **Action**: Run `triage-issue` on the picked ticket. Identify the root cause, establish a reproduction case, and draft a TDD-based fix plan. 
-- **Checkpoint**: Save the triage result to `.agents/triage/<issue-number>.md`.
+- **Checkpoint**: Save the triage result to `.agents/triage/{{ISSUE_ID}}.md`.
 
 ## Step 4: Implementation (TDD Phase)
 
@@ -61,10 +74,14 @@ Ensure the implementation meets project standards.
 
 ## Step 6: Documentation & PR Submission
 
-1. **Commit**: `git commit -m "Fixes #<issue-number>: <title>"`
-2. **Push**: `git push -u origin <branch>`
-3. **PR**: Create a PR using `gh pr create`.
-   - **Body**: Reference the triage notes and the TDD results. Provide a summary of changes and a test plan.
+1. **Commit**: `git commit -m "Fixes #{{ISSUE_ID}}: {{ISSUE_TITLE}}"`
+2. **Push**: `git push -u origin {{BRANCH_NAME}}`
+3. **PR**: Create a PR targeting `{{BASE_BRANCH}}` — **never hardcode `main`**:
+   ```bash
+   gh pr create --base {{BASE_BRANCH}} --title "Fixes #{{ISSUE_ID}}: {{ISSUE_TITLE}}" --body "..."
+   ```
+   - **PR Title**: Must include `[#{{ISSUE_ID}}]` so the daemon can locate it for dependent tasks. e.g., `"Fixes #{{ISSUE_ID}}: {{ISSUE_TITLE}} [#{{ISSUE_ID}}]"`.
+   - **PR Body**: Reference the triage notes and the TDD results. Include `Fixes #{{ISSUE_ID}}` so GitHub cross-references the issue.
 
 ## Step 7: Final Status
 

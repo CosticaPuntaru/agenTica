@@ -55,11 +55,36 @@ Long-running workflows like Epics can exceed the model's context window. To main
 
 ### Phase 5: GitHub Issue Creation (Synchronous)
 9. **Create the Parent Epic (PRD Issue)**
-   - **Tool**: `gh issue create`.
-   - **BLOCKING ACTION**: You MUST capture the resulting **Issue Number** (e.g., `#123`). This number is required for linking all subsequent tasks.
-10. **Create Task Issues**
+   - **Tool**: `gh issue create --title "PRD: <epic-title>" --body "$(cat prd.md)" --label "prd,enhancement"`.
+   - **BLOCKING ACTION**: You MUST capture the resulting **Issue Number** (e.g., `#123`). This number is required for everything below.
+
+10. **Create the Epic Feature Branch**
+    - **IMMEDIATELY** after capturing the PRD issue number, create and push the feature branch:
+      ```bash
+      git checkout main && git pull origin main
+      git checkout -b epic/123-<epic-name>
+      git push -u origin epic/123-<epic-name>
+      ```
+    - **Naming convention**: `epic/<prd-issue-number>-<kebab-case-epic-name>` (e.g., `epic/123-team-billing-dashboard`).
+    - **Why**: The daemon reconstructs this exact branch name from `Parent PRD: #123` in task bodies using the PRD issue title. The branch must exist on remote before tasks are picked up.
+
+11. **Create Task Issues**
     - **Template**: `resources/prd-task.md`.
-    - **Mandatory Linking**: Every task body MUST reference the parent PRD issue number (e.g., "Parent PRD: #123").
+    - **Mandatory fields in every task body**:
+      - `Parent PRD: #123` — used by the daemon to locate the epic feature branch.
+      - `Blocked by: #<dep-issue>` — for tasks that depend on another task. Tasks with no cross-task dependency should write `Blocked by: None`.
+    - **Label**: Every task MUST be created with the `autobot:ready` label so the daemon picks it up:
+      ```bash
+      gh issue create --title "Task: ..." --body "$(cat task-N.md)" --label "task,autobot:ready"
+      ```
+    - **Create tasks in dependency order** (blockers first), capturing each issue number before creating dependent tasks.
+
+## Dependency & Branch Chain
+
+The daemon automatically resolves branches:
+- Task with `Blocked by: None` + `Parent PRD: #123` → branches off `epic/123-<slug>` → PR targets epic branch.
+- Task with `Blocked by: #124` → branches off task #124's PR branch → PR chains on top.
+- The epic branch PR (created manually or by final merge) targets `main`.
 
 ## Guardrails
 

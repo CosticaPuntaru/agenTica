@@ -52,9 +52,31 @@ async function loadConfig() {
       while ((match = blockerRegex.exec(body)) !== null) {
         const blockerNum = match[1]
         const blockerInfo = gh(`issue view ${blockerNum} --json state`, true)
-        if (blockerInfo && blockerInfo.state === 'OPEN') return true
+        if (blockerInfo && blockerInfo.state === 'OPEN') {
+          // Allow if the blocker has an open PR
+          const prs = gh(`pr list --search "[#${blockerNum}]" --state open --json number`, true)
+          if (!prs || prs.length === 0) return true
+        }
       }
       return false
+    },
+    GET_BASE_BRANCH: (issue, gh, defaultBranch) => {
+      const body = issue.body ?? ''
+      const blockerRegex = /Blocked by\s+(?:#|https:\/\/github\.com\/\S+\/issues\/)(\d+)/gi
+      let match
+      while ((match = blockerRegex.exec(body)) !== null) {
+        const blockerNum = match[1]
+        const prs = gh(
+          `pr list --search "[#${blockerNum}]" --state open --json headRefName,title,body`,
+          true,
+        )
+        if (prs && prs.length > 0) {
+          const regex = new RegExp(`(?:fixes|closes|resolves)?\\s*#${blockerNum}\\b`, 'i')
+          const found = prs.find((pr) => regex.test(pr.body) || regex.test(pr.title))
+          if (found) return found.headRefName
+        }
+      }
+      return defaultBranch
     },
     LOG_FILE: resolve(ROOT, 'tmp/github-daemon.log'),
   }
@@ -311,6 +333,32 @@ function ensureCleanMain() {
   }
 }
 
+function ensureBranchExistsRemotely(branch, defaultBranch) {
+  if (branch === defaultBranch) return true
+  try {
+    execSync(`git ls-remote --exit-code --heads origin ${branch}`, {
+      cwd: ROOT,
+      stdio: 'ignore',
+    })
+    // Also fetch it
+    execSync(`git fetch origin ${branch}`, { cwd: ROOT, stdio: 'ignore' })
+    return true
+  } catch {
+    log(`Base branch ${branch} not found on remote. Creating it from ${defaultBranch}...`)
+    try {
+      execSync(`git checkout ${defaultBranch}`, { cwd: ROOT, stdio: 'ignore' })
+      try { execSync(`git branch -D ${branch}`, { cwd: ROOT, stdio: 'ignore' }) } catch {}
+      execSync(`git checkout -b ${branch}`, { cwd: ROOT, stdio: 'ignore' })
+      execSync(`git push -u origin ${branch}`, { cwd: ROOT, stdio: 'ignore' })
+      log(`Created base branch: ${branch}`)
+      return true
+    } catch (err) {
+      log(`Failed to create base branch ${branch}: ${err.message}`)
+      return false
+    }
+  }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function slugify(str) {
@@ -358,10 +406,14 @@ function findExistingPR(issueNumber) {
   }
 
   const prs = gh(
-    `pr list --search "[#${issueNumber}]" --state open --json number,headRefName,url,title`,
+    `pr list --search "[#${issueNumber}]" --state open --json number,headRefName,url,title,body`,
     true,
   )
-  if (prs && prs.length > 0) return prs[0]
+  if (prs && Array.isArray(prs)) {
+    const regex = new RegExp(`(?:fixes|closes|resolves)?\\s*#${issueNumber}\\b`, 'i')
+    const found = prs.find((pr) => regex.test(pr.body) || regex.test(pr.title))
+    if (found) return found
+  }
 
   return null
 }
@@ -529,12 +581,12 @@ ${prContext}
 `.trim()
 }
 
-function buildPrompt(issue, branch) {
+function buildPrompt(issue, branch, baseBranch, defaultBranch) {
   const skill = existsSync(CONFIG.SKILL_FILE) ? readFileSync(CONFIG.SKILL_FILE, 'utf8') : ''
-  const defaultBranch = getDefaultBranch()
   const instructions = skill
     .replace(/^---[\s\S]*?---\n/, '')
     .replaceAll('{{BRANCH_NAME}}', branch)
+    .replaceAll('{{BASE_BRANCH}}', baseBranch)
     .replaceAll('{{ISSUE_ID}}', String(issue.number))
     .replaceAll('{{ISSUE_TITLE}}', issue.title)
     .replaceAll('{{ISSUE_URL}}', issue.url)
@@ -633,14 +685,14 @@ function spawnClaude(prompt) {
       process.stdout.write(d)
       stdout += d
       try {
-        writeFileSync(LOG_FILE, d, { flag: 'a' })
+        writeFileSync(CONFIG.LOG_FILE, d, { flag: 'a' })
       } catch {}
     })
     child.stderr.on('data', (d) => {
       process.stderr.write(d)
       stderr += d
       try {
-        writeFileSync(LOG_FILE, d, { flag: 'a' })
+        writeFileSync(CONFIG.LOG_FILE, d, { flag: 'a' })
       } catch {}
     })
     child.on('close', (code) => {
@@ -722,11 +774,28 @@ async function tick() {
     return
   }
 
-  // 6. Check if there's already an open PR for this issue
-  // TODO: re-enable once findExistingPR false-positive matching is fixed
-  const existingPR = null // findExistingPR(issue.number)
+  const existingPR = findExistingPR(issue.number)
   const isRevision = !!existingPR
   const branch = isRevision ? existingPR.headRefName : branchName(issue)
+
+  const defaultBranch = getDefaultBranch()
+  let baseBranch = defaultBranch
+  
+  if (!isRevision) {
+    try {
+      baseBranch = await CONFIG.GET_BASE_BRANCH(issue, gh, defaultBranch)
+      if (!baseBranch) baseBranch = defaultBranch
+    } catch (err) {
+      log(`WARNING: GET_BASE_BRANCH failed: ${err.message}. Using default.`)
+    }
+    
+    if (!ensureBranchExistsRemotely(baseBranch, defaultBranch)) {
+      log(`ERROR: Base branch ${baseBranch} could not be ensured. Marking as fixme.`)
+      await swapLabels(issue.number, CONFIG.LABELS.inProgress, CONFIG.LABELS.fixme)
+      await addComment(issue.number, `\ud83e\udd16 **Cannot start** \u2014 failed to setup base branch \`${baseBranch}\`. Marked as fixme.`)
+      return
+    }
+  }
 
   if (isRevision) {
     log(
@@ -740,7 +809,7 @@ async function tick() {
   try {
     const prompt = isRevision
       ? buildRevisionPrompt(issue, existingPR)
-      : buildPrompt(issue, branch)
+      : buildPrompt(issue, branch, baseBranch, defaultBranch)
     output = await spawnClaude(prompt)
     log('Claude finished successfully.')
   } catch (err) {
