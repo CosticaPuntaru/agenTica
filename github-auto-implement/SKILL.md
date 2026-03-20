@@ -17,7 +17,7 @@ This skill is designed to be run repeatedly by a daemon. To start the auto-imple
 node resources/scripts/github-daemon.mjs
 ```
 
-The daemon will poll for `autobot:ready` issues and execute this workflow autonomously.
+The daemon will poll for `ready` issues (defined in `.agenTica.js`, default: `autobot:ready`) and execute this workflow autonomously.
 
 ### Optional Configuration
 Create a `.agenTica.js` in your current working directory to customize the experience. Use it to switch between GitHub/GitLab styles or override default constants.
@@ -27,6 +27,7 @@ Create a `.agenTica.js` in your current working directory to customize the exper
 Use `gh issue list` to find ready, unassigned tickets.
 
 ```bash
+# Query is configurable in .agenTica.js. Default:
 gh issue list --search 'is:open is:issue label:autobot:ready -label:autobot:question -label:autobot:in-progress' --json number,title,url,labels,comments,body
 ```
 
@@ -93,7 +94,7 @@ Print `DONE` as the very last line of output.
 - **🤖 Prefix**: Every comment posted to GitHub MUST start with the 🤖 emoji.
 - **Clarification Requested**: If the issue description is ambiguous during Triage:
   1. Comment: `gh issue comment <number> --body "🤖 Need clarification on..."`.
-  2. Edit Labels: `gh issue edit <number> --add-label "autobot:question" --remove-label "autobot:in-progress"`.
+  2. Edit Labels: Swap current `inProgress` label for the `question` label (as defined in `.agenTica.js`).
   3. Output: Print the exact string `CLARIFICATION_REQUESTED` as the final output.
   4. **Stop**: Reset the branch and stop immediately.
 - **No `as` Casting**: Follow `typescript-no-as-casting` (Zod validation preferred).

@@ -76,9 +76,12 @@ Long-running workflows like Epics can exceed the model's context window. To main
     - **Mandatory fields in every task body**:
       - `Parent PRD: #123` — used by the daemon to locate the epic feature branch.
       - `Blocked by: #<dep-issue>` — for tasks that depend on another task. Tasks with no cross-task dependency should write `Blocked by: None`.
-    - **Label**: Every task MUST be created with the `autobot:ready` label so the daemon picks it up:
+    - **Labeling**: 
+      - Read `.agenTica.js` to find the correct `ready` label (defaulting to `autobot:ready`).
+      - **ASK the user**: "Should I label these tasks as 'ready' (e.g., `${READY_LABEL}`) for the autonomous daemon to pick them up immediately?"
+      - Only add the `ready` label if the user confirms.
       ```bash
-      gh issue create --title "Task: ..." --body "$(cat task-N.md)" --label "task,autobot:ready"
+      gh issue create --title "Task: ..." --body "$(cat task-N.md)" --label "task,${READY_LABEL}"
       ```
     - **Create tasks in dependency order** (blockers first), capturing each issue number before creating dependent tasks.
 

@@ -1,16 +1,61 @@
-/**
- * agenTica Configuration File
- *
- * Customize labels, queries, and skill paths for the github-auto-implement daemon.
- */
 export default {
-  // Poll interval in ms
+  // Global poll interval in ms
   POLL_INTERVAL_MS: 300_000,
 
-  // Claude model to use for implementation
-  CLAUDE_MODEL: 'sonnet',
+  /**
+   * Available Agent Profiles.
+   * You can define as many as you want (command + model + optional prompt).
+   */
+  agents: {
+    'expert-claude': {
+      COMMAND: 'claude',
+      MODEL: 'sonnet',
+      ARGS: (agent, model) => ['--print', '--dangerously-skip-permissions', '--model', model],
+      // Provide a file path for the system prompt
+      promptFile: '.agents/prompts/expert-architect.md',
+    },
+    'speedy-claude': {
+      COMMAND: 'claude',
+      MODEL: 'haiku',
+      ARGS: (agent, model) => ['--print', '--dangerously-skip-permissions', '--model', model],
+      prompt: 'You are a pragmatic developer. Focus on speed and solving the issue directly with minimal overhead.',
+    },
+    'antigravity-agent': {
+      COMMAND: 'antigravity',
+      MODEL: 'sonnet',
+      ARGS: (agent, model) => ['--model', model],
+    },
+  },
 
-  // Custom labels for the autobot lifecycle
+  /**
+   * Intelligently route an issue to a specific agent (or fallback list).
+   * @param {Object} issue - The GitHub issue metadata
+   * @param {Object} agents - The mapping of available agents defined above
+   */
+  GET_AGENT: (issue, agents) => {
+    const title = (issue.title || '').toLowerCase()
+    const body = (issue.body || '').toLowerCase()
+
+    // 1. Experimental items try expert first, then fallback to pragmatism
+    if (title.includes('experimental') || body.includes('risky')) {
+      return [agents['expert-claude'], agents['speedy-claude']]
+    }
+
+    // 2. Complex refactors go to the expert
+    if (title.includes('refactor') || body.includes('complex')) {
+      return agents['expert-claude']
+    }
+    
+    // 3. Bugs or fixes use the speedy agent
+    if (title.includes('bug') || title.includes('fix')) {
+      return agents['speedy-claude']
+    }
+
+    // Default to antigravity
+    return agents['antigravity-agent']
+  },
+
+  // Global labels (used for polling and state management)
   LABELS: {
     ready: 'autobot:ready',
     inProgress: 'autobot:in-progress',
@@ -20,51 +65,21 @@ export default {
   },
 
   /**
-   * Custom query for picking issues.
-   * @param {Object} labels - The current labels config
-   * @returns {string} - A GitHub Search query
+   * Custom query for picking issues — shared by default.
    */
   QUERY: (labels) => {
     return `is:issue is:open label:"${labels.ready}" -label:"${labels.question}" -label:"${labels.inProgress}"`
   },
 
   /**
-   * Picking logic for the next issue.
-   * @param {Array} issues - List of ready, unblocked issues.
-   * @returns {Object|null} - The issue to implement.
+   * Picking logic — select which ready issue to work on first.
    */
   PICKER: (issues) => {
-    // Default: first issue (FIFO)
-    return issues[0];
-    
-    // Example: Pick the most recent one (LIFO)
-    // return issues[issues.length - 1];
-
-    // Example: Prioritize by label (if you fetch them in query)
-    // return issues.find(i => i.labels.some(l => l.name === 'high-priority')) || issues[0];
+    return issues[0]
   },
 
   /**
-   * Return the skill/instructions string for a given issue.
-   * Receives the full issue object — use labels, title, body, etc. to pick the right skill.
-   * Return null/undefined to fall back to the default SKILL.md.
-   * @param {Object} issue - The GitHub issue object ({ number, title, body, labels, url, ... })
-   * @returns {string|null} - Skill markdown content, or null to use the default.
-   */
-  // GET_SKILL: (issue) => {
-  //   const labels = issue.labels?.map((l) => l.name) ?? []
-  //   if (labels.includes('type:bug')) return readFileSync('./skills/bugfix.md', 'utf8')
-  //   if (labels.includes('type:feature')) return readFileSync('./skills/feature.md', 'utf8')
-  //   return null // fall back to default SKILL.md
-  // },
-
-  /**
-   * Blocker detection logic.
-   * Return true if the issue should be skipped due to blockers.
-   * Allows PR chaining: a blocked issue can start if the blocker already has an open PR.
-   * @param {Object} issue - The issue object from GitHub.
-   * @param {Function} gh - The host's gh(cmd, asJson) helper.
-   * @returns {boolean}
+   * Blocker detection — shared by all agents.
    */
   IS_BLOCKED: (issue, gh) => {
     const body = issue.body ?? ''
@@ -74,7 +89,6 @@ export default {
       const blockerNum = match[1]
       const blockerInfo = gh(`issue view ${blockerNum} --json state`, true)
       if (blockerInfo && blockerInfo.state === 'OPEN') {
-        // Allow if the blocker has an open PR — supports epic branch chaining
         const blockerPrs = gh(`pr list --search "[#${blockerNum}]" --state open --json number`, true)
         if (!blockerPrs || blockerPrs.length === 0) return true
       }
@@ -83,17 +97,10 @@ export default {
   },
 
   /**
-   * Determine the base branch for a new issue.
-   * Priority: 1) blocker's PR branch (PR chaining), 2) epic feature branch (via Parent PRD), 3) default.
-   * @param {Object} issue - The issue object from GitHub.
-   * @param {Function} gh - The host's gh(cmd, asJson) helper.
-   * @param {string} defaultBranch - The repository's default branch (e.g. 'main').
-   * @returns {string} - The exact branch name to use as a base.
+   * Base branch determination — shared by all agents.
    */
   GET_BASE_BRANCH: async (issue, gh, defaultBranch) => {
     const body = issue.body ?? ''
-
-    // 1. If blocked, base off the blocker's open PR branch (PR chaining for dependent tasks)
     const blockerRegex = /Blocked by\s+(?:#|https:\/\/github\.com\/\S+\/issues\/)(\d+)/gi
     let match = blockerRegex.exec(body)
     if (match) {
@@ -106,19 +113,16 @@ export default {
         const regex = new RegExp(`(?:fixes|closes|resolves)?\\s*#${blockerNum}\\b`, 'i')
         const found = blockerPrs.find((pr) => regex.test(pr.body) || regex.test(pr.title))
         if (found) return found.headRefName
-        // Fallback: use first result if no regex match
         return blockerPrs[0].headRefName
       }
     }
 
-    // 2. If it has a Parent PRD, base off the epic feature branch (constructed from PRD issue)
     const parentRegex = /Parent PRD:?\s*#(\d+)/i
     const parentMatch = parentRegex.exec(body)
     if (parentMatch) {
       const epicNum = parentMatch[1]
       const epicIssue = gh(`issue view ${epicNum} --json title,number`, true)
       if (epicIssue) {
-        // Must match the branch created by epic-workflow: epic/<number>-<slug>
         const slug = epicIssue.title
           .toLowerCase()
           .replace(/^prd:\s*/i, '')
@@ -129,7 +133,6 @@ export default {
       }
     }
 
-    // 3. Fallback to default branch (one-off tickets)
     return defaultBranch
   },
 }

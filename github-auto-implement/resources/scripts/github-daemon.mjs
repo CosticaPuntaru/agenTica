@@ -32,9 +32,14 @@ import { fileURLToPath } from 'url'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
 
 async function loadConfig() {
-  const defaults = {
+  const globalDefaults = {
     POLL_INTERVAL_MS: 300_000,
-    CLAUDE_MODEL: 'sonnet',
+    LOG_FILE: resolve(ROOT, 'tmp/github-daemon.log'),
+  }
+
+  const agentDefaults = {
+    COMMAND: 'claude',
+    MODEL: 'sonnet',
     SKILL_FILE: resolve(dirname(fileURLToPath(import.meta.url)), '../../SKILL.md'),
     LABELS: {
       ready: 'autobot:ready',
@@ -43,7 +48,8 @@ async function loadConfig() {
       question: 'autobot:question',
       fixme: 'autobot:fixme',
     },
-    QUERY: (labels) => `is:issue is:open label:"${labels.ready}" -label:"${labels.question}" -label:"${labels.inProgress}"`,
+    QUERY: (labels) =>
+      `is:issue is:open label:"${labels.ready}" -label:"${labels.question}" -label:"${labels.inProgress}"`,
     PICKER: (issues) => issues[0],
     IS_BLOCKED: (issue, gh) => {
       const body = issue.body ?? ''
@@ -78,20 +84,32 @@ async function loadConfig() {
       }
       return defaultBranch
     },
-    GET_SKILL: null, // Set by config merge below once SKILL_FILE is resolved
-    LOG_FILE: resolve(ROOT, 'tmp/github-daemon.log'),
+    BRANCH_PREFIX: 'autobot/',
+    GET_SKILL: (agent, _issue) => {
+      if (agent.promptFile && existsSync(agent.promptFile)) {
+        return readFileSync(agent.promptFile, 'utf8')
+      }
+      if (agent.SKILL_FILE && existsSync(agent.SKILL_FILE)) {
+        return readFileSync(agent.SKILL_FILE, 'utf8')
+      }
+      return ''
+    },
+    ARGS: (agent, model) => ['--print', '--dangerously-skip-permissions', '--model', model],
+    GET_MODEL: (agent, _issue) => {
+      const models = agent.MODELS || [agent.MODEL]
+      return models[Math.floor(Math.random() * models.length)]
+    },
   }
-
-  // Default GET_SKILL reads the SKILL_FILE (can be overridden in .agenTica.js)
-  defaults.GET_SKILL = (_issue) =>
-    existsSync(defaults.SKILL_FILE) ? readFileSync(defaults.SKILL_FILE, 'utf8') : ''
 
   const pwdConfigPath = resolve(process.cwd(), '.agenTica.js')
   const rootConfigPath = resolve(ROOT, '.agenTica.js')
-  const configPath = existsSync(pwdConfigPath) ? pwdConfigPath : (existsSync(rootConfigPath) ? rootConfigPath : null)
-  
-  let userConfig = {}
+  const configPath = existsSync(pwdConfigPath)
+    ? pwdConfigPath
+    : existsSync(rootConfigPath)
+      ? rootConfigPath
+      : null
 
+  let userConfig = {}
   if (configPath) {
     try {
       const imported = await import(`file://${configPath}`)
@@ -101,20 +119,49 @@ async function loadConfig() {
     }
   }
 
-  const merged = {
-    ...defaults,
-    ...userConfig,
-    LABELS: {
-      ...defaults.LABELS,
-      ...(userConfig.LABELS || {}),
-    },
+  // Handle env var legacy / simplicity
+  const pollInterval = Number(
+    process.env.POLL_INTERVAL_MS ?? userConfig.POLL_INTERVAL_MS ?? globalDefaults.POLL_INTERVAL_MS,
+  )
+  const logFile = process.env.LOG_FILE ?? userConfig.LOG_FILE ?? globalDefaults.LOG_FILE
+
+  // Resolve agents mapping
+  const agents = userConfig.agents || {
+    default: { ...agentDefaults, ...userConfig },
+  }
+  const resolvedAgents = {}
+  for (const [id, a] of Object.entries(agents)) {
+    resolvedAgents[id] = {
+      ...agentDefaults,
+      ...userConfig,
+      ...a,
+      LABELS: {
+        ...agentDefaults.LABELS,
+        ...(userConfig.LABELS || {}),
+        ...(a.LABELS || {}),
+      },
+    }
   }
 
-  // Env vars take precedence
-  merged.POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? userConfig.POLL_INTERVAL_MS ?? defaults.POLL_INTERVAL_MS)
-  merged.CLAUDE_MODEL = process.env.CLAUDE_MODEL ?? userConfig.CLAUDE_MODEL ?? defaults.CLAUDE_MODEL
-
-  return merged
+  return {
+    POLL_INTERVAL_MS: pollInterval,
+    LOG_FILE: logFile,
+    LABELS: {
+      ...agentDefaults.LABELS,
+      ...(userConfig.LABELS || {}),
+    },
+    agents: resolvedAgents,
+    GET_AGENT:
+      userConfig.GET_AGENT ||
+      ((issue, agents) => {
+        // Default: use the first one available
+        const firstId = Object.keys(agents)[0]
+        return agents[firstId]
+      }),
+    PICKER: userConfig.PICKER || agentDefaults.PICKER,
+    QUERY: userConfig.QUERY || agentDefaults.QUERY,
+    IS_BLOCKED: userConfig.IS_BLOCKED || agentDefaults.IS_BLOCKED,
+  }
 }
 
 let CONFIG = null // To be initialized in main()
@@ -181,7 +228,7 @@ function warnConflictingLabels() {
   if (conflicts && conflicts.length > 0) {
     for (const c of conflicts) {
       log(
-        `\u26a0 WARNING: Issue #${c.number} (${c.title}) has both 'autobot:ready' and 'autobot:question' \u2014 ignored until 'autobot:question' is removed.`,
+        `\u26a0 WARNING: Issue #${c.number} (${c.title}) has both '${CONFIG.LABELS.ready}' and '${CONFIG.LABELS.question}' \u2014 ignored until '${CONFIG.LABELS.question}' is removed.`,
       )
     }
   }
@@ -374,8 +421,9 @@ function slugify(str) {
     .slice(0, 50)
 }
 
-function branchName(issue) {
-  return `claude/${issue.number}-${slugify(issue.title)}`
+function branchName(agent, issue) {
+  const prefix = agent.BRANCH_PREFIX || 'claude-'
+  return `${prefix}${issue.number}-${slugify(issue.title)}`
 }
 
 function findExistingPR(issueNumber) {
@@ -582,8 +630,21 @@ ${prContext}
 `.trim()
 }
 
-function buildPrompt(issue, branch, baseBranch, defaultBranch) {
-  const skill = CONFIG.GET_SKILL(issue) ?? ''
+function buildPrompt(agent, issue, branch, baseBranch, defaultBranch) {
+  let skill = agent.prompt || ''
+
+  if (!skill && agent.promptFile) {
+    const fpath = resolve(ROOT, agent.promptFile)
+    if (existsSync(fpath)) {
+      skill = readFileSync(fpath, 'utf8')
+    } else {
+      log(`WARNING: promptFile not found: ${fpath}`)
+    }
+  }
+
+  if (!skill) {
+    skill = agent.GET_SKILL(agent, issue) ?? ''
+  }
   const instructions = skill
     .replace(/^---[\s\S]*?---\n/, '')
     .replaceAll('{{BRANCH_NAME}}', branch)
@@ -593,17 +654,12 @@ function buildPrompt(issue, branch, baseBranch, defaultBranch) {
     .replaceAll('{{ISSUE_URL}}', issue.url)
     .replaceAll('origin/master', `origin/${defaultBranch}`)
 
-  const full = gh(
-    `issue view ${issue.number} --json body,labels,comments`,
-    true,
-  )
+  const full = gh(`issue view ${issue.number} --json body,labels,comments`, true)
   const body = full?.body ?? issue.body ?? '(no description provided)'
 
   const labelNames = (full?.labels ?? issue.labels ?? []).map((l) => l.name)
   const labelSection =
-    labelNames.length > 0
-      ? `### Labels\n${labelNames.map((n) => `- ${n}`).join('\n')}`
-      : ''
+    labelNames.length > 0 ? `### Labels\n${labelNames.map((n) => `- ${n}`).join('\n')}` : ''
 
   const comments = full?.comments ?? []
   const commentSection =
@@ -662,19 +718,17 @@ function disableSleepPrevention() {
   log('Sleep prevention disabled.')
 }
 
-function spawnClaude(prompt) {
+function spawnAgent(agent, issue, prompt) {
   return new Promise((resolve, reject) => {
-    log('Spawning claude --dangerously-skip-permissions ...')
+    const model = agent.GET_MODEL(agent, issue)
+    const args = typeof agent.ARGS === 'function' ? agent.ARGS(agent, model) : agent.ARGS
+    log(`Spawning ${agent.COMMAND} ${args.join(' ')} (model: ${model}) ...`)
 
-    const child = spawn(
-      'claude',
-      ['--print', '--dangerously-skip-permissions', '--model', CONFIG.CLAUDE_MODEL],
-      {
-        cwd: ROOT,
-        env: { ...process.env, ANTHROPIC_API_KEY: undefined },
-        stdio: ['pipe', 'pipe', 'pipe'],
-      },
-    )
+    const child = spawn(agent.COMMAND, args, {
+      cwd: ROOT,
+      env: { ...process.env, ANTHROPIC_API_KEY: undefined },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
 
     child.stdin.write(prompt, 'utf8')
     child.stdin.end()
@@ -702,7 +756,7 @@ function spawnClaude(prompt) {
         resolve(stdout)
       } else {
         const tail = stderr.trim().split('\n').slice(-10).join('\n')
-        const err = new Error(`claude exited ${code}`)
+        const err = new Error(`${agent.COMMAND} exited ${code}`)
         err.stderr = tail
         reject(err)
       }
@@ -735,7 +789,18 @@ async function validateLabels() {
     log('WARNING: Could not determine repo. Skipping label validation.')
     return
   }
+  const allLabels = new Set()
+  for (const agent of Object.values(CONFIG.agents)) {
+    for (const label of Object.values(agent.LABELS)) {
+      allLabels.add(label)
+    }
+  }
+  // Include global labels
   for (const label of Object.values(CONFIG.LABELS)) {
+    allLabels.add(label)
+  }
+
+  for (const label of allLabels) {
     const existing = gh(`label list --search "${label}" --json name`, true)
     const found = existing?.some((l) => l.name === label)
     if (!found) {
@@ -743,7 +808,7 @@ async function validateLabels() {
       gh(`label create "${label}" --force`, false)
     }
   }
-  log('All required labels verified: ' + Object.values(CONFIG.LABELS).join(', '))
+  log('All required labels verified: ' + Array.from(allLabels).join(', '))
 }
 
 // ── Main tick ─────────────────────────────────────────────────────────────────
@@ -762,135 +827,130 @@ async function tick() {
   // 3. Get ready issues
   const issues = await getReadyIssues()
   if (issues.length === 0) {
-    log('No ready issues \u2014 nothing to do.')
+    log('No ready issues — nothing to do.')
     return
   }
 
   const issue = CONFIG.PICKER(issues)
   if (!issue) {
-    log('Picker returned no issue \u2014 nothing to do.')
+    log('Picker returned no issue — nothing to do.')
     return
   }
-  log(`Picked: #${issue.number} \u2014 ${issue.title}`)
+  log(`Picked: #${issue.number} — ${issue.title}`)
 
-  // 4. Claim the issue: swap labels (no assignee changes)
-  await swapLabels(issue.number, CONFIG.LABELS.ready, CONFIG.LABELS.inProgress)
-  log(`Marked #${issue.number} as in-progress`)
-
-  // 5. Ensure clean git state
-  if (!ensureCleanMain()) {
-    log('ERROR: Git is not in a clean state. Marking as fixme.')
-    await swapLabels(issue.number, CONFIG.LABELS.inProgress, CONFIG.LABELS.fixme)
-    await addComment(
-      issue.number,
-      '\ud83e\udd16 **Cannot start** \u2014 git working tree is not clean. Marked as fixme.',
-    )
+  // 4. Select Agent(s)
+  const agentSelection = await CONFIG.GET_AGENT(issue, CONFIG.agents)
+  const agents = Array.isArray(agentSelection) ? agentSelection : [agentSelection]
+  if (agents.length === 0 || !agents[0]) {
+    log('GET_AGENT returned no agent — skipping issue.')
     return
   }
 
-  const existingPR = findExistingPR(issue.number)
-  const isRevision = !!existingPR
-  const branch = isRevision ? existingPR.headRefName : branchName(issue)
+  // 5. Try each agent in the list
+  let success = false
 
-  const defaultBranch = getDefaultBranch()
-  let baseBranch = defaultBranch
-  
-  if (!isRevision) {
-    try {
-      baseBranch = await CONFIG.GET_BASE_BRANCH(issue, gh, defaultBranch)
-      if (!baseBranch) baseBranch = defaultBranch
-    } catch (err) {
-      log(`WARNING: GET_BASE_BRANCH failed: ${err.message}. Using default.`)
-    }
-    
-    if (!ensureBranchExistsRemotely(baseBranch, defaultBranch)) {
-      log(`ERROR: Base branch ${baseBranch} could not be ensured. Marking as fixme.`)
-      await swapLabels(issue.number, CONFIG.LABELS.inProgress, CONFIG.LABELS.fixme)
-      await addComment(issue.number, `\ud83e\udd16 **Cannot start** \u2014 failed to setup base branch \`${baseBranch}\`. Marked as fixme.`)
+  for (let i = 0; i < agents.length; i++) {
+    const agent = agents[i]
+    log(`Attempting agent ${i + 1}/${agents.length}: ${agent.name || 'unnamed'} via ${agent.COMMAND} ...`)
+
+    // 5a. Claim/Prepare the issue for THIS agent
+    const labels = agent.LABELS || CONFIG.LABELS
+    await swapLabels(issue.number, labels.ready, labels.inProgress)
+
+    // 5b. Ensure clean git state
+    if (!ensureCleanMain()) {
+      log('ERROR: Git is not in a clean state.')
+      await swapLabels(issue.number, labels.inProgress, labels.fixme)
+      await addComment(issue.number, '\ud83e\udd16 **Cannot start** \u2014 git working tree is not clean. Marked as fixme.')
       return
     }
-  }
 
-  if (isRevision) {
-    log(
-      `Found existing PR #${existingPR.number} on branch ${branch} \u2014 entering revision mode`,
-    )
-  }
+    const existingPR = findExistingPR(issue.number)
+    const isRevision = !!existingPR
+    const branch = isRevision ? existingPR.headRefName : branchName(agent, issue)
 
-  // 7. Clean up any stale pr-meta from a previous run
-  cleanPrMeta()
+    const defaultBranch = getDefaultBranch()
+    let baseBranch = defaultBranch
 
-  // 8. Run claude
-  let output = ''
+    if (!isRevision) {
+      try {
+        baseBranch = await agent.GET_BASE_BRANCH(issue, gh, defaultBranch)
+        if (!baseBranch) baseBranch = defaultBranch
+      } catch (err) {
+        log(`WARNING: GET_BASE_BRANCH failed: ${err.message}. Using default.`)
+      }
 
-  try {
+      if (!ensureBranchExistsRemotely(baseBranch, defaultBranch)) {
+        log(`ERROR: Base branch ${baseBranch} could not be ensured.`)
+        await swapLabels(issue.number, agent.LABELS.inProgress, agent.LABELS.fixme)
+        await addComment(issue.number, `\ud83e\udd16 **Cannot start** \u2014 failed to setup base branch \`${baseBranch}\`. Marked as fixme.`)
+        return
+      }
+    }
+
+    if (isRevision) {
+      log(`Found existing PR #${existingPR.number} on branch ${branch} \u2014 entering revision mode`)
+    }
+
+    // 5c. Prepare Prompt
     const prompt = isRevision
       ? buildRevisionPrompt(issue, existingPR)
-      : buildPrompt(issue, branch, baseBranch, defaultBranch)
-    output = await spawnClaude(prompt)
-    log('Claude finished successfully.')
-  } catch (err) {
-    log(`ERROR during claude run: ${err.message}`)
-    if (err.stderr) log(`stderr tail:\n${err.stderr}`)
-    await swapLabels(issue.number, CONFIG.LABELS.inProgress, CONFIG.LABELS.fixme)
-    const details = err.stderr ? `\n\n\`\`\`\n${err.stderr}\n\`\`\`` : ''
-    await addComment(
-      issue.number,
-      `\ud83e\udd16 **${isRevision ? 'Revision' : 'Implementation'} failed** \u2014 marked as fixme.\n\nError: ${err.message}${details}`,
-    )
-    return
-  }
+      : buildPrompt(agent, issue, branch, baseBranch, defaultBranch)
 
-  // 9. Check for clarification request
-  if (output.includes('CLARIFICATION_REQUESTED')) {
-    log('Clarification needed \u2014 swapping to question.')
-    await swapLabels(issue.number, CONFIG.LABELS.inProgress, CONFIG.LABELS.question)
-    return
-  }
-
-  // 10. Post-run: create PR (new issues) or just swap label (revisions)
-  if (!isRevision) {
-    const meta = readPrMeta()
-    if (!meta) {
-      log('WARNING: tmp/pr-meta.json not found after Claude run.')
-      await addComment(
-        issue.number,
-        `\ud83e\udd16 Implementation complete but PR metadata file not found.\nBranch: \`${branch}\``,
-      )
-      return
-    }
-
-    const bodyPath = resolve(ROOT, 'tmp/pr-body.md')
-    writeFileSync(bodyPath, meta.body ?? '', 'utf8')
-
-    log(`Creating PR: ${meta.title}`)
-    const prResult = gh(
-      `pr create --base ${baseBranch} --head ${branch} --title ${JSON.stringify(meta.title)} --body-file ${bodyPath}`,
-      false,
-    )
+    // 5d. Run Agent
     cleanPrMeta()
-    try { unlinkSync(bodyPath) } catch {}
+    try {
+      const output = await spawnAgent(agent, issue, prompt)
+      log(`${agent.COMMAND} finished successfully.`)
 
-    // gh pr create outputs the PR URL to stdout when --json is not used
-    const prUrl = typeof prResult === 'string' ? prResult.trim() : null
-    if (!prUrl) {
-      log('WARNING: gh pr create returned no URL.')
-      await addComment(issue.number, `\ud83e\udd16 PR may have been created but URL could not be confirmed.\nBranch: \`${branch}\``)
-      return
+      if (output.includes('CLARIFICATION_REQUESTED')) {
+        log('Clarification needed \u2014 swapping to question.')
+        await swapLabels(issue.number, labels.inProgress, labels.question)
+      } else if (!isRevision) {
+        // Create PR
+        const meta = readPrMeta()
+        if (!meta) {
+          log('WARNING: tmp/pr-meta.json not found.')
+          await addComment(issue.number, `\ud83e\udd16 Implementation complete but PR metadata file not found.\nBranch: \`${branch}\``)
+        } else {
+          const bodyPath = resolve(ROOT, 'tmp/pr-body.md')
+          writeFileSync(bodyPath, meta.body ?? '', 'utf8')
+          log(`Creating PR: ${meta.title}`)
+          const prResult = gh(`pr create --base ${baseBranch} --head ${branch} --title ${JSON.stringify(meta.title)} --body-file ${bodyPath}`, false)
+          cleanPrMeta()
+          try { unlinkSync(bodyPath) } catch {}
+          const prUrl = typeof prResult === 'string' ? prResult.trim() : null
+          if (prUrl) {
+            log(`PR URL: ${prUrl}`)
+            await addComment(issue.number, `\ud83e\udd16 **PR opened:** ${prUrl}`)
+          }
+          await swapLabels(issue.number, labels.inProgress, labels.inReview)
+        }
+      } else {
+        // Update PR
+        await addComment(issue.number, `\ud83e\udd16 **PR updated with review fixes:** ${existingPR.url}`)
+        await swapLabels(issue.number, labels.inProgress, labels.inReview)
+      }
+
+      success = true
+      break
+    } catch (err) {
+      log(`ERROR during ${agent.COMMAND} run: ${err.message}`)
+      if (i < agents.length - 1) {
+        log(`Attempt ${i + 1} failed. Powering through to next agent...`)
+        try { execSync('git reset --hard && git clean -fd', { cwd: ROOT }) } catch {}
+        continue
+      }
+      // Ultimate failure
+      await swapLabels(issue.number, labels.inProgress, labels.fixme)
+      const details = err.stderr ? `\n\n\`\`\`\n${err.stderr}\n\`\`\`` : ''
+      await addComment(issue.number, `\ud83e\udd16 **All agents failed** \u2014 marked as fixme.\n\nError from last attempt (${agent.COMMAND}): ${err.message}${details}`)
     }
-
-    log(`PR URL: ${prUrl}`)
-    await addComment(issue.number, `\ud83e\udd16 **PR opened:** ${prUrl}`)
-    await swapLabels(issue.number, CONFIG.LABELS.inProgress, CONFIG.LABELS.inReview)
-    log(`Attached PR to #${issue.number}.`)
-  } else {
-    // Revision: PR already exists, just swap label
-    await addComment(issue.number, `\ud83e\udd16 **PR updated with review fixes:** ${existingPR.url}`)
-    await swapLabels(issue.number, CONFIG.LABELS.inProgress, CONFIG.LABELS.inReview)
-    log(`Updated PR #${existingPR.number} for #${issue.number}.`)
   }
 
-  log(`Done: #${issue.number} \u2014 ${issue.title}`)
+  if (success) {
+    log(`Done: #${issue.number} \u2014 ${issue.title}`)
+  }
 }
 
 // ── Log tail display ──────────────────────────────────────────────────────────
@@ -952,7 +1012,8 @@ async function main() {
   CONFIG = await loadConfig()
   enableSleepPrevention()
   log('\u2501\u2501\u2501 GitHub daemon started \u2501\u2501\u2501')
-  log(`Poll: every ${CONFIG.POLL_INTERVAL_MS / 1000}s | Model: ${CONFIG.CLAUDE_MODEL}`)
+  log(`Poll: every ${CONFIG.POLL_INTERVAL_MS / 1000}s`)
+  log(`Agents: ${CONFIG.agents.map((a) => a.COMMAND).join(', ')}`)
   log(`Repo: ${ROOT}`)
   log(`Logs: ${CONFIG.LOG_FILE}`)
   log('Press Ctrl-C to stop.')
@@ -960,6 +1021,7 @@ async function main() {
   await validateLabels()
 
   const runTick = async () => {
+    if (activeChild) return // Locally busy
     stopLogTail()
     await tick().catch((err) => log(`ERROR in tick: ${err.message}`))
     startLogTail()
