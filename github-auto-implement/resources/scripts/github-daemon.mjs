@@ -191,9 +191,8 @@ function gh(cmd, asJson = true) {
     })
     return asJson ? JSON.parse(output) : output.trim()
   } catch (err) {
-    if (asJson) {
-      log(`gh error: ${err.message}`)
-    }
+    const stderr = err.stderr ? err.stderr.toString() : ''
+    log(`gh error: command "gh ${cmd}" failed with: ${err.message}${stderr ? `\nStderr: ${stderr}` : ''}`)
     return null
   }
 }
@@ -292,10 +291,20 @@ async function hasInProgressIssue() {
   return false
 }
 
-async function swapLabels(issueNum, removeL, addL) {
-  // Add first, remove second \u2014 ensures the issue always has at least one autobot:* label
-  if (addL) gh(`issue edit ${issueNum} --add-label "${addL}"`, false)
-  if (removeL) gh(`issue edit ${issueNum} --remove-label "${removeL}"`, false)
+async function swapLabels(issueNum, removeLs, addLs) {
+  const removes = (Array.isArray(removeLs) ? removeLs : [removeLs]).filter(Boolean)
+  const adds = (Array.isArray(addLs) ? addLs : [addLs]).filter(Boolean)
+
+  if (removes.length === 0 && adds.length === 0) return
+
+  log(`Swapping labels for #${issueNum}: +[${adds.join(', ')}] -[${removes.join(', ')}]`)
+
+  for (const l of adds) {
+    gh(`issue edit ${issueNum} --add-label "${l}"`, false)
+  }
+  for (const l of removes) {
+    gh(`issue edit ${issueNum} --remove-label "${l}"`, false)
+  }
 }
 
 function getRepoNameWithOwner() {
@@ -552,7 +561,7 @@ Your job is to **resolve all open review feedback** \u2014 fix requested changes
 
 Work **fully autonomously** \u2014 do not pause to ask for permission.
 
-**Important:** Every comment you post to GitHub (issues or PRs) MUST start with the \ud83e\udd16 emoji as a prefix.
+**Important:** Every comment you post to GitHub (issues or PRs) MUST start with the 🤖 emoji as a prefix.
 
 ## Workflow
 
@@ -572,9 +581,9 @@ Identify what needs to be fixed or changed.
 ### 3. Ask for clarification if needed
 
 If at **any point** you encounter something ambiguous, unclear, or missing:
-1. Post a comment (always prefix with \ud83e\udd16):
+1. Post a comment (always prefix with 🤖):
    \\\`\\\`\\\`bash
-   gh pr comment ${pr.number} --body "\ud83e\udd16 I need clarification: ..."
+   gh pr comment ${pr.number} --body "🤖 I need clarification: ..."
    \\\`\\\`\\\`
 2. Swap labels:
    \\\`\\\`\\\`bash
@@ -861,7 +870,7 @@ async function tick() {
     if (!ensureCleanMain()) {
       log('ERROR: Git is not in a clean state.')
       await swapLabels(issue.number, labels.inProgress, labels.fixme)
-      await addComment(issue.number, '\ud83e\udd16 **Cannot start** \u2014 git working tree is not clean. Marked as fixme.')
+      await addComment(issue.number, '🤖 **Cannot start** \u2014 git working tree is not clean. Marked as fixme.')
       return
     }
 
@@ -883,7 +892,7 @@ async function tick() {
       if (!ensureBranchExistsRemotely(baseBranch, defaultBranch)) {
         log(`ERROR: Base branch ${baseBranch} could not be ensured.`)
         await swapLabels(issue.number, agent.LABELS.inProgress, agent.LABELS.fixme)
-        await addComment(issue.number, `\ud83e\udd16 **Cannot start** \u2014 failed to setup base branch \`${baseBranch}\`. Marked as fixme.`)
+        await addComment(issue.number, `🤖 **Cannot start** \u2014 failed to setup base branch \`${baseBranch}\`. Marked as fixme.`)
         return
       }
     }
@@ -911,7 +920,7 @@ async function tick() {
         const meta = readPrMeta()
         if (!meta) {
           log('WARNING: tmp/pr-meta.json not found.')
-          await addComment(issue.number, `\ud83e\udd16 Implementation complete but PR metadata file not found.\nBranch: \`${branch}\``)
+          await addComment(issue.number, '🤖 Implementation complete but PR metadata file not found.\nBranch: `' + branch + '`')
         } else {
           const bodyPath = resolve(ROOT, 'tmp/pr-body.md')
           writeFileSync(bodyPath, meta.body ?? '', 'utf8')
@@ -922,14 +931,16 @@ async function tick() {
           const prUrl = typeof prResult === 'string' ? prResult.trim() : null
           if (prUrl) {
             log(`PR URL: ${prUrl}`)
-            await addComment(issue.number, `\ud83e\udd16 **PR opened:** ${prUrl}`)
+            await addComment(issue.number, `🤖 **PR opened:** ${prUrl}`)
           }
-          await swapLabels(issue.number, labels.inProgress, labels.inReview)
         }
+        // Always swap to in review if we didn't crash before this.
+        // We explicitly remove 'ready' again here just in case the start-time removal failed or race condition occurred.
+        await swapLabels(issue.number, [labels.inProgress, labels.ready], labels.inReview)
       } else {
         // Update PR
-        await addComment(issue.number, `\ud83e\udd16 **PR updated with review fixes:** ${existingPR.url}`)
-        await swapLabels(issue.number, labels.inProgress, labels.inReview)
+        await addComment(issue.number, `🤖 **PR updated with review fixes:** ${existingPR.url}`)
+        await swapLabels(issue.number, [labels.inProgress, labels.ready], labels.inReview)
       }
 
       success = true
@@ -944,7 +955,7 @@ async function tick() {
       // Ultimate failure
       await swapLabels(issue.number, labels.inProgress, labels.fixme)
       const details = err.stderr ? `\n\n\`\`\`\n${err.stderr}\n\`\`\`` : ''
-      await addComment(issue.number, `\ud83e\udd16 **All agents failed** \u2014 marked as fixme.\n\nError from last attempt (${agent.COMMAND}): ${err.message}${details}`)
+      await addComment(issue.number, `🤖 **All agents failed** \u2014 marked as fixme.\n\nError from last attempt (${agent.COMMAND}): ${err.message}${details}`)
     }
   }
 
