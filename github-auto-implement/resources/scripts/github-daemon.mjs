@@ -853,6 +853,59 @@ async function tick() {
   log(`Done: #${issue.number} \u2014 ${issue.title}`)
 }
 
+// ── Log tail display ──────────────────────────────────────────────────────────
+
+const LOG_TAIL_LINES = 5
+let logTailInterval = null
+let logTailRenderedCount = 0 // how many lines are currently occupying the terminal
+
+function getLastLogLines() {
+  try {
+    const content = existsSync(CONFIG.LOG_FILE) ? readFileSync(CONFIG.LOG_FILE, 'utf8') : ''
+    const all = content.split('\n').filter(Boolean)
+    const tail = all.slice(-LOG_TAIL_LINES)
+    // Pad top with empty lines so the block is always exactly LOG_TAIL_LINES tall
+    while (tail.length < LOG_TAIL_LINES) tail.unshift('')
+    return tail
+  } catch {
+    return Array(LOG_TAIL_LINES).fill('')
+  }
+}
+
+function clearLogTailBlock() {
+  if (logTailRenderedCount === 0) return
+  process.stdout.write(`\x1b[${logTailRenderedCount}A`)
+  for (let i = 0; i < logTailRenderedCount; i++) {
+    process.stdout.write('\x1b[2K\n')
+  }
+  process.stdout.write(`\x1b[${logTailRenderedCount}A`)
+  logTailRenderedCount = 0
+}
+
+function renderLogTail() {
+  const lines = getLastLogLines()
+  clearLogTailBlock()
+  const cols = process.stdout.columns || 80
+  for (const line of lines) {
+    const truncated = line.length > cols ? line.slice(0, cols - 1) : line
+    process.stdout.write(`\x1b[2m${truncated}\x1b[0m\n`)
+  }
+  logTailRenderedCount = lines.length
+}
+
+function startLogTail() {
+  renderLogTail()
+  logTailInterval = setInterval(renderLogTail, 3000)
+}
+
+function stopLogTail() {
+  if (logTailInterval) {
+    clearInterval(logTailInterval)
+    logTailInterval = null
+  }
+  clearLogTailBlock()
+}
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -866,14 +919,18 @@ async function main() {
 
   await validateLabels()
 
-  await tick().catch((err) => log(`ERROR in tick: ${err.message}`))
-  setInterval(
-    () => tick().catch((err) => log(`ERROR in tick: ${err.message}`)),
-    CONFIG.POLL_INTERVAL_MS,
-  )
+  const runTick = async () => {
+    stopLogTail()
+    await tick().catch((err) => log(`ERROR in tick: ${err.message}`))
+    startLogTail()
+  }
+
+  await runTick()
+  setInterval(runTick, CONFIG.POLL_INTERVAL_MS)
 }
 
 function shutdown(signal) {
+  stopLogTail()
   log(`${signal} received \u2014 shutting down.`)
   if (activeChild) {
     log('Killing active claude subprocess...')
