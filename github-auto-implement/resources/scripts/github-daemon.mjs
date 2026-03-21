@@ -221,7 +221,7 @@ function gh(cmd, asJson = true) {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
     })
-    return asJson ? JSON.parse(output) : output.trim()
+    return asJson ? (output.trim() ? JSON.parse(output) : null) : output.trim()
   } catch (err) {
     const stderr = err.stderr ? err.stderr.toString() : ''
     log(`gh error: command "gh ${cmd}" failed with: ${err.message}${stderr ? `\nStderr: ${stderr}` : ''}`)
