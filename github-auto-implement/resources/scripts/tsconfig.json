@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
+    "target": "ES2022",
     "module": "CommonJS",
     "moduleResolution": "node",
     "strict": true,
@@ -11,6 +11,8 @@
   },
   "include": [
     "types.ts",
-    "schemas.ts"
+    "schemas.ts",
+    "lifecycle.ts",
+    "lifecycle.test.ts"
   ]
 }
