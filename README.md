@@ -103,15 +103,45 @@ github-auto-implement daemon
 
 ## Configuration
 
-Copy or create `.agenTica.js` in your project root to customize the daemon:
+Create `.agenTica.ts` (or `.agenTica.js`) in your project root to customize the daemon. Using `.ts` provides full IDE autocomplete for labels, agents, and **lifecycle hooks**.
 
-```js
+See [agenTica.sample.ts](agenTica.sample.ts) for a comprehensive list of all available options and hooks.
+
+### Basic Example (.agenTica.ts)
+
+```ts
+import type { AgenTicaConfig } from './github-auto-implement/resources/scripts/types'
+
 export default {
-  POLL_INTERVAL_MS: 300_000,   // 5 minutes
-  CLAUDE_MODEL: 'sonnet',
-  LABELS: { ready: 'autobot:ready', ... },
-  PICKER: (issues) => issues[0],         // FIFO by default
-  IS_BLOCKED: (issue, gh) => { ... },    // PR-chaining aware
-  GET_BASE_BRANCH: async (issue, gh, defaultBranch) => { ... },  // epic branch resolution
+  pollIntervalMs: 600_000, // 10 minutes
+  labels: {
+    ready: 'autobot:ready',
+  },
+  agents: {
+    sonnet: { model: 'sonnet' },
+    haiku: { model: 'haiku' },
+  },
+  // Simple round-robin or custom logic
+  getAgent: (issue, agents) => agents.sonnet,
+} satisfies AgenTicaConfig
+```
+
+### Lifecycle Hooks
+
+agenTica uses `hookable` to provide over 40 intercept points across the implementation and planning workflows. Hooks can be used for deep logging, notification (Slack/Discord), or to mutate implementation context on the fly.
+
+```ts
+hooks: {
+  preLoop: async (ctx) => {
+    console.log(`[Tick] Starting poll at ${ctx.startedAt}`)
+  },
+  postListIssues: async (ctx) => {
+    // Modify the query or issues list before the daemon processes them
+    console.log(`Found ${ctx.issues.length} candidate issues`)
+  },
+  preSpawnAgent: async (ctx) => {
+    // Intercept the final prompt before sending to Claude
+    ctx.prompt += "\n\nPS: Do not use any console.log in code."
+  }
 }
 ```

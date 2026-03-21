@@ -26,7 +26,7 @@ import {
 } from 'fs'
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
-import { createDaemonHooks } from './lifecycle.ts'
+import { createDaemonHooks, callStep } from './lifecycle.js'
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -318,16 +318,22 @@ function warnConflictingLabels() {
 }
 
 async function getReadyIssues() {
-  const query = CONFIG.buildQuery(CONFIG.labels)
-  const issues = gh(
-    `issue list --search "${query}" --limit 50 --json number,title,labels,body,url`,
+  const ctxList = { query: CONFIG.buildQuery(CONFIG.labels) }
+  await callStep(CONFIG.hooks, 'preListIssues', ctxList)
+
+  const rawIssues = gh(
+    `issue list --search "${ctxList.query}" --limit 50 --json number,title,labels,body,url`,
     true,
   )
 
-  if (!issues) {
+  if (!rawIssues) {
     log('Failed to fetch issues.')
     return []
   }
+
+  ctxList.issues = rawIssues
+  await callStep(CONFIG.hooks, 'postListIssues', ctxList)
+  const issues = ctxList.issues
 
   const valid = []
   for (const issue of issues) {
@@ -339,10 +345,19 @@ async function getReadyIssues() {
       continue
     }
 
-    const details = gh(`issue view ${issue.number} --json comments`, true)
+    const ctxGet = { issueNumber: issue.number }
+    await callStep(CONFIG.hooks, 'preGetIssue', ctxGet)
+
+    // Merge comments into the issue if they weren't fetched in the list view
+    const details = gh(`issue view ${ctxGet.issueNumber} --json comments`, true)
+    
+    ctxGet.issue = { ...issue, ...details }
+    await callStep(CONFIG.hooks, 'postGetIssue', ctxGet)
+    const finalizedIssue = ctxGet.issue
+
     let commentSkip = false
-    if (details && details.comments) {
-      for (const c of details.comments) {
+    if (finalizedIssue.comments) {
+      for (const c of finalizedIssue.comments) {
         const cbody = (c.body ?? '').toLowerCase()
         if (
           cbody.includes('human only') ||
@@ -357,7 +372,7 @@ async function getReadyIssues() {
       }
     }
 
-    if (!commentSkip) valid.push(issue)
+    if (!commentSkip) valid.push(finalizedIssue)
   }
 
   return valid
@@ -376,19 +391,24 @@ async function hasInProgressIssue() {
 }
 
 async function swapLabels(issueNum, removeLs, addLs) {
-  const removes = (Array.isArray(removeLs) ? removeLs : [removeLs]).filter(Boolean)
-  const adds = (Array.isArray(addLs) ? addLs : [addLs]).filter(Boolean)
-
-  if (removes.length === 0 && adds.length === 0) return
-
-  log(`Swapping labels for #${issueNum}: +[${adds.join(', ')}] -[${removes.join(', ')}]`)
-
-  for (const l of adds) {
-    gh(`issue edit ${issueNum} --add-label "${l}"`, false)
+  const ctx = {
+    issueNumber: issueNum,
+    add: (Array.isArray(addLs) ? addLs : [addLs]).filter(Boolean),
+    remove: (Array.isArray(removeLs) ? removeLs : [removeLs]).filter(Boolean),
   }
-  for (const l of removes) {
-    gh(`issue edit ${issueNum} --remove-label "${l}"`, false)
+  await callStep(CONFIG.hooks, 'preSetLabel', ctx)
+
+  if (ctx.remove.length === 0 && ctx.add.length === 0) return
+
+  log(`Swapping labels for #${ctx.issueNumber}: +[${ctx.add.join(', ')}] -[${ctx.remove.join(', ')}]`)
+
+  for (const l of ctx.add) {
+    gh(`issue edit ${ctx.issueNumber} --add-label "${l}"`, false)
   }
+  for (const l of ctx.remove) {
+    gh(`issue edit ${ctx.issueNumber} --remove-label "${l}"`, false)
+  }
+  await callStep(CONFIG.hooks, 'postSetLabel', ctx)
 }
 
 function getRepoNameWithOwner() {
@@ -397,19 +417,24 @@ function getRepoNameWithOwner() {
 }
 
 async function addComment(issueNum, body) {
+  const ctx = { issueNumber: issueNum, body }
+  await callStep(CONFIG.hooks, 'preAddComment', ctx)
+
   const repo = getRepoNameWithOwner()
   if (!repo) return null
 
   const tmpFile = resolve(ROOT, `tmp/gh-comment-${Date.now()}.txt`)
-  writeFileSync(tmpFile, body)
+  writeFileSync(tmpFile, ctx.body)
 
   try {
     const res = execSync(
-      `gh api /repos/${repo}/issues/${issueNum}/comments -F body=@"${tmpFile}"`,
+      `gh api /repos/${repo}/issues/${ctx.issueNumber}/comments -F body=@"${tmpFile}"`,
       { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] },
     )
     const parsed = JSON.parse(res)
     unlinkSync(tmpFile)
+    ctx.commentId = parsed.id
+    await callStep(CONFIG.hooks, 'postAddComment', ctx)
     return parsed.id
   } catch (e) {
     if (existsSync(tmpFile)) unlinkSync(tmpFile)
@@ -627,7 +652,15 @@ function getPRContext(prNumber) {
   return context
 }
 
-function buildRevisionPrompt(issue, pr) {
+async function buildRevisionPrompt(issue, pr) {
+  const ctx = { issue, pr }
+  await callStep(CONFIG.hooks, 'preBuildRevisionPrompt', ctx)
+
+  if (ctx.prompt) {
+    await callStep(CONFIG.hooks, 'postBuildRevisionPrompt', ctx)
+    return ctx.prompt
+  }
+
   const branch = pr.headRefName
 
   const full = gh(
@@ -650,7 +683,7 @@ function buildRevisionPrompt(issue, pr) {
 
   const prContext = getPRContext(pr.number)
 
-  return `# Revision Mode \u2014 Resolve PR Feedback
+  const prompt = `# Revision Mode \u2014 Resolve PR Feedback
 
 You have been given a GitHub issue that already has an open PR (#${pr.number}).
 Your job is to **resolve all open review feedback** \u2014 fix requested changes, address comments, and push updates.
@@ -733,9 +766,21 @@ ${issueCommentSection}
 
 ${prContext}
 `.trim()
+
+  ctx.prompt = prompt
+  await callStep(CONFIG.hooks, 'postBuildRevisionPrompt', ctx)
+  return ctx.prompt
 }
 
-function buildPrompt(agent, issue, branch, baseBranch, defaultBranch, step = 'coding', prd = null) {
+async function buildPrompt(agent, issue, branch, baseBranch, defaultBranch, step = 'coding', prd = null, skillOverride = null) {
+  const ctx = { issue, agent, branch, baseBranch, step }
+  await callStep(CONFIG.hooks, 'preBuildPrompt', ctx)
+
+  if (ctx.prompt) {
+    await callStep(CONFIG.hooks, 'postBuildPrompt', ctx)
+    return ctx.prompt
+  }
+
   let workflow = ''
   if (agent.promptFile) {
     const fpath = resolve(ROOT, agent.promptFile)
@@ -754,11 +799,13 @@ function buildPrompt(agent, issue, branch, baseBranch, defaultBranch, step = 'co
   const skill = workflow.replace(/^---[\s\S]*?---\n/, '')
   const modelPrompt = `${persona}${skill}`
 
-  let rootPrompt = ''
-  if (step === 'review' && CONFIG.getReviewSkill) {
-    rootPrompt = typeof CONFIG.getReviewSkill === 'function' ? CONFIG.getReviewSkill(issue, prd, agent) : CONFIG.getReviewSkill
-  } else if (step === 'coding' && CONFIG.getCodePrompt) {
-    rootPrompt = typeof CONFIG.getCodePrompt === 'function' ? CONFIG.getCodePrompt(issue, prd, agent) : CONFIG.getCodePrompt
+  let rootPrompt = skillOverride
+  if (!rootPrompt) {
+    if (step === 'review' && CONFIG.getReviewSkill) {
+      rootPrompt = typeof CONFIG.getReviewSkill === 'function' ? CONFIG.getReviewSkill(issue, prd, agent) : CONFIG.getReviewSkill
+    } else if (step === 'coding' && CONFIG.getCodePrompt) {
+      rootPrompt = typeof CONFIG.getCodePrompt === 'function' ? CONFIG.getCodePrompt(issue, prd, agent) : CONFIG.getCodePrompt
+    }
   }
 
   const combined = rootPrompt ? `${rootPrompt}\n\n${modelPrompt}` : modelPrompt
@@ -798,16 +845,11 @@ Review these changes, check them against the requirements, and make fixes where 
       ? `### Comments\n${comments.map((c, i) => `**Comment ${i + 1}** (by ${c.author?.login ?? 'unknown'}):\n${c.body}`).join('\n\n---\n\n')}`
       : ''
 
-  let prdSection = ''
-  if (prd && prd.body) {
-    prdSection = `## Parent PRD\n\n### ${prd.title}\n\n${prd.body}\n\n---\n\n`
-  }
-
-  return `${instructions}
+  ctx.prompt = `${instructions}
 
 ---
 
-${prdSection}## Issue to implement: #${issue.number} \u2014 ${issue.title}
+${prd ? `## Parent PRD\n\n### ${prd.title}\n\n### ${prd.body}\n\n---\n\n` : ''}## Issue to implement: #${issue.number} \u2014 ${issue.title}
 
 ${body}
 
@@ -815,6 +857,9 @@ ${labelSection}
 
 ${commentSection}
 `.trim()
+
+  await callStep(CONFIG.hooks, 'postBuildPrompt', ctx)
+  return ctx.prompt
 }
 
 // Track the active child so we can kill it on exit
@@ -854,19 +899,22 @@ function disableSleepPrevention() {
   log('Sleep prevention disabled.')
 }
 
-function spawnAgent(agent, issue, prompt) {
-  return new Promise((resolve, reject) => {
-    const model = agent.getModel(agent, issue)
-    const args = typeof agent.args === 'function' ? agent.args(agent, model) : agent.args
-    log(`Spawning ${agent.command} ${args.join(' ')} (model: ${model}) ...`)
+async function spawnAgent(agent, issue, prompt) {
+  const ctx = { agent, issue, prompt }
+  await callStep(CONFIG.hooks, 'preSpawnAgent', ctx)
 
-    const child = spawn(agent.command, args, {
+  return new Promise((resolve, reject) => {
+    const model = ctx.agent.getModel(ctx.agent, ctx.issue)
+    const args = typeof ctx.agent.args === 'function' ? ctx.agent.args(ctx.agent, model) : ctx.agent.args
+    log(`Spawning ${ctx.agent.command} ${args.join(' ')} (model: ${model}) ...`)
+
+    const child = spawn(ctx.agent.command, args, {
       cwd: ROOT,
       env: { ...process.env, ANTHROPIC_API_KEY: undefined },
       stdio: ['pipe', 'pipe', 'pipe'],
     })
 
-    child.stdin.write(prompt, 'utf8')
+    child.stdin.write(ctx.prompt, 'utf8')
     child.stdin.end()
 
     activeChild = child
@@ -886,10 +934,12 @@ function spawnAgent(agent, issue, prompt) {
         writeFileSync(CONFIG.logFile, d, { flag: 'a' })
       } catch {}
     })
-    child.on('close', (code) => {
+    child.on('close', async (code) => {
       activeChild = null
       if (code === 0) {
-        resolve(stdout)
+        ctx.output = stdout
+        await callStep(CONFIG.hooks, 'postSpawnAgent', ctx)
+        resolve(ctx.output)
       } else {
         const tail = stderr.trim().split('\n').slice(-10).join('\n')
         const err = new Error(`${agent.command} exited ${code}`)
@@ -949,14 +999,20 @@ async function validateLabels() {
 
 // ── Main tick ─────────────────────────────────────────────────────────────────
 
+let currentTick = 0
+
 async function tick() {
-  log('Polling GitHub...')
+  const tickCtx = { tick: currentTick++, startedAt: new Date() }
+  await callStep(CONFIG.hooks, 'preLoop', tickCtx)
+
+  log(`Polling GitHub (tick ${tickCtx.tick})...`)
 
   // 1. Warn about conflicting labels
   warnConflictingLabels()
 
   // 2. Guard: distributed lock via labels
   if (await hasInProgressIssue()) {
+    await callStep(CONFIG.hooks, 'postLoop', tickCtx)
     return
   }
 
@@ -964,12 +1020,19 @@ async function tick() {
   const issues = await getReadyIssues()
   if (issues.length === 0) {
     log('No ready issues — nothing to do.')
+    await callStep(CONFIG.hooks, 'postLoop', tickCtx)
     return
   }
 
-  const issue = CONFIG.pickIssue(issues)
+  const pickCtx = { issues, picked: CONFIG.pickIssue(issues) }
+  await callStep(CONFIG.hooks, 'prePickIssue', pickCtx)
+  // pickIssue hook can override the choice
+  const issue = pickCtx.picked
+  await callStep(CONFIG.hooks, 'postPickIssue', pickCtx)
+
   if (!issue) {
     log('Picker returned no issue — nothing to do.')
+    await callStep(CONFIG.hooks, 'postLoop', tickCtx)
     return
   }
   log(`Picked: #${issue.number} — ${issue.title}`)
@@ -981,6 +1044,7 @@ async function tick() {
   const agents = Array.isArray(agentSelection) ? agentSelection : [agentSelection]
   if (agents.length === 0 || !agents[0]) {
     log('getAgent returned no agent — skipping issue.')
+    await callStep(CONFIG.hooks, 'postLoop', tickCtx)
     return
   }
 
@@ -1011,12 +1075,19 @@ async function tick() {
     let baseBranch = defaultBranch
 
     if (!isRevision) {
+      const gbbCtx = { issue, defaultBranch }
+      await callStep(CONFIG.hooks, 'preGetBaseBranch', gbbCtx)
+
       try {
-        baseBranch = await agent.getBaseBranch(issue, gh, defaultBranch)
+        baseBranch = gbbCtx.baseBranch || await agent.getBaseBranch(issue, gh, defaultBranch)
         if (!baseBranch) baseBranch = defaultBranch
       } catch (err) {
         log(`WARNING: getBaseBranch failed: ${err.message}. Using default.`)
       }
+
+      gbbCtx.baseBranch = baseBranch
+      await callStep(CONFIG.hooks, 'postGetBaseBranch', gbbCtx)
+      baseBranch = gbbCtx.baseBranch
 
       if (!ensureBranchExistsRemotely(baseBranch, defaultBranch)) {
         log(`ERROR: Base branch ${baseBranch} could not be ensured.`)
@@ -1032,16 +1103,22 @@ async function tick() {
 
     // 5c. Prepare Prompt
     const prompt = isRevision
-      ? buildRevisionPrompt(issue, existingPR)
-      : buildPrompt(agent, issue, branch, baseBranch, defaultBranch, 'coding', prdInfo)
+      ? await buildRevisionPrompt(issue, existingPR)
+      : await buildPrompt(agent, issue, branch, baseBranch, defaultBranch, 'coding', prdInfo)
 
     // 5d. Run Agent
     cleanPrMeta()
+    const taskCtx = { issue, agent, branch, baseBranch }
+    await callStep(CONFIG.hooks, 'preStartTask', taskCtx)
+
     try {
       const output = await spawnAgent(agent, issue, prompt)
+      taskCtx.output = output
+      await callStep(CONFIG.hooks, 'postStartTask', taskCtx)
+
       log(`${agent.command} finished successfully.`)
 
-      if (output.includes('CLARIFICATION_REQUESTED')) {
+      if (taskCtx.output.includes('CLARIFICATION_REQUESTED')) {
         log('Clarification needed \u2014 swapping to question.')
         await swapLabels(issue.number, [labels.inProgress, labels.ready], labels.question)
       } else {
@@ -1051,10 +1128,17 @@ async function tick() {
         try {
           const status = execSync('git status --porcelain', { cwd: ROOT, encoding: 'utf8' }).trim()
           if (status) {
-            log('WARNING: Uncommitted changes detected. Auto-committing them.')
-            execSync('git add -A', { cwd: ROOT })
-            execSync(`git commit -m "Auto-commit remaining changes for #${issue.number}"`, { cwd: ROOT })
-            await addComment(issue.number, `🤖 **Note:** Auto-committed some leftover uncommitted files to \`${branch}\` before pushing.`)
+            const commitCtx = { issueNumber: issue.number, branch, message: `Auto-commit remaining changes for #${issue.number}` }
+            await callStep(CONFIG.hooks, 'preAutoCommit', commitCtx)
+
+            if (commitCtx.message) {
+              log('WARNING: Uncommitted changes detected. Auto-committing them.')
+              execSync('git add -A', { cwd: ROOT })
+              execSync(`git commit -m "${commitCtx.message}"`, { cwd: ROOT })
+              await addComment(issue.number, `🤖 **Note:** Auto-committed some leftover uncommitted files to \`${commitCtx.branch}\` before pushing.`)
+              commitCtx.committed = true
+            }
+            await callStep(CONFIG.hooks, 'postAutoCommit', commitCtx)
           }
 
           if (!isRevision && !CONFIG.disableReview && CONFIG.getReviewSkill) {
@@ -1064,6 +1148,15 @@ async function tick() {
              const reviewAgentSelection = await CONFIG.getAgent(issue, CONFIG.agents, { step: 'review', prdInfo })
              const reviewAgents = Array.isArray(reviewAgentSelection) ? reviewAgentSelection : [reviewAgentSelection]
              
+             const reviewSkillCtx = { issue, prd: prdInfo, agent: reviewAgents[0] }
+             await callStep(CONFIG.hooks, 'preGetReviewSkill', reviewSkillCtx)
+             if (!reviewSkillCtx.skill && CONFIG.getReviewSkill) {
+               reviewSkillCtx.skill = typeof CONFIG.getReviewSkill === 'function' 
+                 ? CONFIG.getReviewSkill(issue, prdInfo, reviewAgents[0]) 
+                 : CONFIG.getReviewSkill
+             }
+             await callStep(CONFIG.hooks, 'postGetReviewSkill', reviewSkillCtx)
+
              let reviewSuccess = false
              reviewSkipped = false;
              for (let j = 0; j < reviewAgents.length; j++) {
@@ -1071,12 +1164,19 @@ async function tick() {
                if (!revAgent) continue;
                
                log(`Running review agent ${j + 1}/${reviewAgents.length}: ${revAgent.name || revAgent.command}...`)
-               const reviewPrompt = buildPrompt(revAgent, issue, branch, baseBranch, defaultBranch, 'review', prdInfo)
                
+               const reviewPrompt = await buildPrompt(revAgent, issue, branch, baseBranch, defaultBranch, 'review', prdInfo, reviewSkillCtx.skill)
+               
+               const startReviewCtx = { issue, agent: revAgent, branch, baseBranch }
+               await callStep(CONFIG.hooks, 'preStartReview', startReviewCtx)
+
                try {
                  const revOutput = await spawnAgent(revAgent, issue, reviewPrompt)
+                 startReviewCtx.output = revOutput
+                 await callStep(CONFIG.hooks, 'postStartReview', startReviewCtx)
+
                  log(`${revAgent.command} review completed successfully.`)
-                 if (revOutput.includes('CLARIFICATION_REQUESTED')) {
+                 if (startReviewCtx.output.includes('CLARIFICATION_REQUESTED')) {
                     log('Review step requested clarification.');
                     await addComment(issue.number, `🤖 **Note:** Code review requested clarification. Continuing with push anyway.`);
                  }
@@ -1129,17 +1229,23 @@ async function tick() {
           if (body && !body.includes(`#${issue.number}`)) {
             body += `\n\nFixes #${issue.number}`
           }
-          writeFileSync(bodyPath, body, 'utf8')
-          log(`Creating PR: ${meta.title}`)
+
+          const prCtx = { issue, branch, baseBranch, title: meta.title, body }
+          await callStep(CONFIG.hooks, 'preCreatePullRequest', prCtx)
+
+          writeFileSync(bodyPath, prCtx.body, 'utf8')
+          log(`Creating PR: ${prCtx.title}`)
           
-          const safeTitle = (meta.title || '').replace(/"/g, '\\"')
-          const prResult = gh(`pr create --base ${baseBranch} --head ${branch} --title "${safeTitle}" --body-file ${bodyPath}`, false)
+          const safeTitle = (prCtx.title || '').replace(/"/g, '\\"')
+          const prResult = gh(`pr create --base ${prCtx.baseBranch} --head ${prCtx.branch} --title "${safeTitle}" --body-file ${bodyPath}`, false)
           cleanPrMeta()
           try { unlinkSync(bodyPath) } catch {}
           const prUrl = typeof prResult === 'string' ? prResult.trim() : null
           if (prUrl) {
-            log(`PR URL: ${prUrl}`)
-            await addComment(issue.number, `🤖 **PR opened:** ${prUrl}`)
+            prCtx.url = prUrl
+            await callStep(CONFIG.hooks, 'postCreatePullRequest', prCtx)
+            log(`PR URL: ${prCtx.url}`)
+            await addComment(issue.number, `🤖 **PR opened:** ${prCtx.url}`)
             prCreated = true
           } else {
             log('WARNING: Failed to create PR.')
@@ -1183,6 +1289,7 @@ async function tick() {
   if (success) {
     log(`Done: #${issue.number} \u2014 ${issue.title}`)
   }
+  await callStep(CONFIG.hooks, 'postLoop', tickCtx)
 }
 
 // ── Log tail display ──────────────────────────────────────────────────────────
