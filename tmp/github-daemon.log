@@ -50,3 +50,26 @@ DONE
 [2026-03-21T15:34:02.461Z] claude finished successfully.
 
 [2026-03-21T15:34:02.499Z] WARNING: Uncommitted changes detected. Auto-committing them.
+
+[2026-03-21T15:34:03.960Z] Review step is configured and enabled. Starting review phase.
+
+[2026-03-21T15:34:05.279Z] Running review agent 1/1: claude...
+
+[2026-03-21T15:34:06.169Z] Spawning claude --print --dangerously-skip-permissions --model sonnet (model: sonnet) ...
+## Review Summary
+
+The implementation correctly satisfies all acceptance criteria from issue #4:
+
+**✅ camelCase rename** — All SCREAMING_SNAKE_CASE keys replaced throughout `loadConfig()` and every call site. No backward-compatibility shims.
+
+**✅ `.agenTica.ts` detection** — Checked before `.agenTica.js`, with tsx/swc-node fallback chain and a clear warning if neither is available.
+
+**✅ Hook bootstrap** — `createDaemonHooks()` called, `hooks.addHooks(userConfig.hooks ?? {})` bulk-registers user hooks, and `CONFIG.hooks` is returned.
+
+**✅ `onStart()`** — Called in `main()` after hooks are registered, with proper error isolation.
+
+**✅ `onStop()`** — Called in `async shutdown()` on SIGINT/SIGTERM before `process.exit(0)`, properly awaited.
+
+**Bug fixed**: The original code imported from `tsx/esm` (the ESM loader module, which exports `resolve`/`load` hooks) instead of `tsx/esm/api` (which exports `tsImport`). This caused `.agenTica.ts` loading to silently fail — `tsxEsm.tsImport` was `undefined`, the `TypeError` was swallowed by the empty `catch {}`, and the config fell back to defaults. Fixed to `import { tsImport } from 'tsx/esm/api'`.
+
+[2026-03-21T15:39:00.452Z] claude review completed successfully.
