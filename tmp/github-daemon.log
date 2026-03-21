@@ -73,3 +73,29 @@ The implementation correctly satisfies all acceptance criteria from issue #4:
 **Bug fixed**: The original code imported from `tsx/esm` (the ESM loader module, which exports `resolve`/`load` hooks) instead of `tsx/esm/api` (which exports `tsImport`). This caused `.agenTica.ts` loading to silently fail — `tsxEsm.tsImport` was `undefined`, the `TypeError` was swallowed by the empty `catch {}`, and the config fell back to defaults. Fixed to `import { tsImport } from 'tsx/esm/api'`.
 
 [2026-03-21T15:39:00.452Z] claude review completed successfully.
+
+[2026-03-21T19:24:12.560Z] Sleep prevention enabled.
+
+[2026-03-21T19:24:12.562Z] ━━━ GitHub daemon started ━━━
+
+[2026-03-21T19:24:12.563Z] Poll: every 300s
+
+[2026-03-21T19:24:12.564Z] Agents: claude
+
+[2026-03-21T19:24:12.565Z] Repo: C:\Users\ticaa\Desktop\workspace\agenTica
+
+[2026-03-21T19:24:12.565Z] Logs: C:\Users\ticaa\Desktop\workspace\agenTica\tmp\github-daemon.log
+
+[2026-03-21T19:24:12.566Z] Press Ctrl-C to stop.
+
+[2026-03-21T19:24:17.391Z] All required labels verified: autobot:ready, autobot:in-progress, autobot:in-review, autobot:question, autobot:fixme, autobot:reviewSkipped
+
+[2026-03-21T19:24:17.393Z] Polling GitHub (tick 0)...
+
+[2026-03-21T19:24:20.063Z] Picked: #14 — test 1
+
+[2026-03-21T19:24:20.064Z] Attempting agent 1/1: unnamed via claude ...
+
+[2026-03-21T19:24:20.065Z] Swapping labels for #14: +[autobot:in-progress] -[autobot:ready]
+
+[2026-03-21T19:24:23.577Z] WARNING: Uncommitted changes detected. Stashing before switching branches.

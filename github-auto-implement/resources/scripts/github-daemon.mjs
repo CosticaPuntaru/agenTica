@@ -26,7 +26,7 @@ import {
 } from 'fs'
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
-import { createDaemonHooks, callStep } from './lifecycle.ts'
+import { createDaemonHooks, callStep } from './lifecycle.js'
 
 // ── Config ────────────────────────────────────────────────────────────────────
 

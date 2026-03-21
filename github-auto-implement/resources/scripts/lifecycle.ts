@@ -92,7 +92,7 @@ function serializeCtx(obj: unknown): string {
  * Instantiate the typed hookable instance. Call once at daemon startup and
  * pass the result through to every `callStep` invocation.
  */
-export function createDaemonHooks(): Hookable<AgenTicaHookMap> {
+function createDaemonHooks(): Hookable<AgenTicaHookMap> {
   return createHooks<AgenTicaHookMap>()
 }
 
@@ -106,7 +106,7 @@ export function createDaemonHooks(): Hookable<AgenTicaHookMap> {
  * 5. On Zod error: logs step name + phase, then re-throws.
  * 6. On hook error: re-throws with step name context attached.
  */
-export async function callStep<N extends keyof AgenTicaHookMap>(
+async function callStep<N extends keyof AgenTicaHookMap>(
   hooks: Hookable<AgenTicaHookMap>,
   name: N,
   ctx: Parameters<AgenTicaHookMap[N]>[0],
@@ -151,3 +151,5 @@ export async function callStep<N extends keyof AgenTicaHookMap>(
     console.log(JSON.stringify({ step: name, mutated: true }))
   }
 }
+
+export { createDaemonHooks, callStep }
