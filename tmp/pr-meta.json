@@ -1,0 +1,4 @@
+{
+  "title": "Fixes #3: Task: lifecycle.ts + hookable integration [#3]",
+  "body": "## Summary\n\n- Adds `lifecycle.ts` with `createDaemonHooks()` (typed `Hookable<AgenTicaHookMap>`) and `callStep()` (Zod-validated hook invocation wrapper)\n- `callStep` validates context before **and** after hook execution, logs structured mutation events, and propagates hook errors with step-name context\n- Adds `lifecycle.test.ts` with 7 vitest unit tests covering pre/post mutations, pre/post validation failures, hook error propagation, and the no-op path\n- Installs `vitest` as a dev dependency and wires `npm test` to `vitest run`\n\nSee `.agents/triage/3.md` for the full investigation and test plan.\n\nFixes #3"
+}

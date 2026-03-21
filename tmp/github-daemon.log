@@ -1,0 +1,28 @@
+PR created: https://github.com/CosticaPuntaru/agenTica/pull/11
+
+---
+
+## What was done
+
+**Files created/modified:**
+
+- `github-auto-implement/resources/scripts/lifecycle.ts` — exports `createDaemonHooks()` and `callStep()`
+  - `createDaemonHooks()` — thin `createHooks<AgenTicaHookMap>()` wrapper from `hookable`
+  - `hookSchemas` — explicit map of all 40 hook names → their Zod schemas from `schemas.ts`
+  - `callStep(hooks, name, ctx)` — pre-validates ctx, calls hooks (with error wrapping), post-validates, logs `{ step, mutated: true }` on any non-function field change
+
+- `github-auto-implement/resources/scripts/lifecycle.test.ts` — 7 vitest tests covering all acceptance criteria
+
+- `package.json` — `"test": "vitest run"` + `vitest` added to devDependencies
+
+- `tsconfig.json` — includes the two new files
+
+- `.agents/triage/3.md` — triage notes
+
+**All 7 tests pass. No changes to `github-daemon.mjs`.**
+
+DONE
+
+[2026-03-21T15:07:25.286Z] claude finished successfully.
+
+[2026-03-21T15:07:25.332Z] WARNING: Uncommitted changes detected. Auto-committing them.
