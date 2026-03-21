@@ -11,6 +11,11 @@
       "sourceType": "github",
       "computedHash": "e0c50de6d64f528cb4ea32b142e2ec499e291efbc6996369ac4a1eea76d4870c"
     },
+    "epic-workflow": {
+      "source": "C:\\Users\\ticaa\\Desktop\\workspace\\agenTica\\epic-workflow",
+      "sourceType": "local",
+      "computedHash": "b3cdedfcc19e4b2a489ad393b21705b7943b45039170bff83bc0084499d403f5"
+    },
     "git-guardrails-claude-code": {
       "source": "mattpocock/skills",
       "sourceType": "github",
