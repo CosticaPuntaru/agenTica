@@ -154,11 +154,11 @@ Do not ask for permission. Fix problems directly.`,
     try {
       let imported
       if (isTs) {
-        // Try tsx/esm first
+        // Try tsx/esm/api first (tsImport handles transpilation without a pre-loaded loader)
         let loaded = false
         try {
-          const tsxEsm = await import('tsx/esm')
-          imported = await tsxEsm.tsImport(`file://${configPath}`, import.meta.url)
+          const { tsImport } = await import('tsx/esm/api')
+          imported = await tsImport(`file://${configPath}`, import.meta.url)
           loaded = true
         } catch {}
 
