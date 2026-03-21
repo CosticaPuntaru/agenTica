@@ -126,6 +126,10 @@ export async function callStep<N extends keyof AgenTicaHookMap>(
 
   // Hook invocation
   try {
+    // TypeScript cannot resolve InferCallback<AgenTicaHookMap, N> ≡ AgenTicaHookMap[N] in a generic
+    // context because InferCallback is a deferred conditional type — a known TS/hookable limitation.
+    // The call is type-safe at runtime: every hook in AgenTicaHookMap accepts exactly one context arg.
+    // @ts-expect-error -- deferred InferCallback conditional prevents generic narrowing
     await hooks.callHook(name, ctx)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
