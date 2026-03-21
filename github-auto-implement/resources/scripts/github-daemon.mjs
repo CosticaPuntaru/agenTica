@@ -26,6 +26,7 @@ import {
 } from 'fs'
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
+import { createDaemonHooks } from './lifecycle.ts'
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -33,16 +34,16 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
 
 async function loadConfig() {
   const globalDefaults = {
-    POLL_INTERVAL_MS: 300_000,
-    LOG_FILE: resolve(ROOT, 'tmp/github-daemon.log'),
+    pollIntervalMs: 300_000,
+    logFile: resolve(ROOT, 'tmp/github-daemon.log'),
     disableReview: false,
   }
 
   const agentDefaults = {
-    COMMAND: 'claude',
-    MODEL: 'sonnet',
-    SKILL_FILE: resolve(dirname(fileURLToPath(import.meta.url)), '../../SKILL.md'),
-    LABELS: {
+    command: 'claude',
+    model: 'sonnet',
+    skillFile: resolve(dirname(fileURLToPath(import.meta.url)), '../../SKILL.md'),
+    labels: {
       ready: 'autobot:ready',
       inProgress: 'autobot:in-progress',
       inReview: 'autobot:in-review',
@@ -50,10 +51,10 @@ async function loadConfig() {
       fixme: 'autobot:fixme',
       reviewSkipped: 'autobot:reviewSkipped',
     },
-    QUERY: (labels) =>
+    buildQuery: (labels) =>
       `is:issue is:open label:"${labels.ready}" -label:"${labels.question}" -label:"${labels.inProgress}"`,
-    PICKER: (issues) => issues[0],
-    IS_BLOCKED: (issue, gh) => {
+    pickIssue: (issues) => issues[0],
+    isBlocked: (issue, gh) => {
       const body = issue.body ?? ''
       const blockerRegex = /Blocked by\s+(?:#|https:\/\/github\.com\/\S+\/issues\/)(\d+)/gi
       let match
@@ -68,9 +69,9 @@ async function loadConfig() {
       }
       return false
     },
-    GET_BASE_BRANCH: (issue, gh, defaultBranch) => {
+    getBaseBranch: (issue, gh, defaultBranch) => {
       const body = issue.body ?? ''
-      
+
       // Determine if there is a Parent PRD to fall back to instead of defaultBranch
       let fallbackBranch = defaultBranch
       const epicRegex = /Parent PRD:\s+(?:#|https:\/\/github\.com\/\S+\/issues\/)(\d+)/gi
@@ -94,7 +95,7 @@ async function loadConfig() {
         if (prs && prs.length > 0) {
           const exactFound = prs.find((pr) => pr.title.includes(`[#${blockerNum}]`))
           if (exactFound) return exactFound.headRefName
-          
+
           const regex = new RegExp(`(?:fixes|closes|resolves)?\\s*#${blockerNum}\\b`, 'i')
           const found = prs.find((pr) => regex.test(pr.body) || regex.test(pr.title))
           if (found) return found.headRefName
@@ -106,53 +107,95 @@ async function loadConfig() {
       }
       return fallbackBranch
     },
-    BRANCH_PREFIX: 'autobot/',
-    GET_SKILL: (agent, _issue) => {
+    branchPrefix: 'autobot/',
+    getSkill: (agent, _issue) => {
       if (agent.promptFile && existsSync(agent.promptFile)) {
         return readFileSync(agent.promptFile, 'utf8')
       }
-      if (agent.SKILL_FILE && existsSync(agent.SKILL_FILE)) {
-        return readFileSync(agent.SKILL_FILE, 'utf8')
+      if (agent.skillFile && existsSync(agent.skillFile)) {
+        return readFileSync(agent.skillFile, 'utf8')
       }
       return ''
     },
-    ARGS: (agent, model) => ['--print', '--dangerously-skip-permissions', '--model', model],
-    GET_MODEL: (agent, _issue) => {
-      const models = agent.MODELS || [agent.MODEL]
+    args: (agent, model) => ['--print', '--dangerously-skip-permissions', '--model', model],
+    getModel: (agent, _issue) => {
+      const models = agent.models || [agent.model]
       return models[Math.floor(Math.random() * models.length)]
     },
-    GET_CODE_PROMPT: (issue, prd, agent) => '',
-    GET_REVIEW_PROMPT: (issue, prd, agent) => `You are a Senior Engineer acting as a code reviewer.
+    getCodePrompt: (_issue, _prd, _agent) => '',
+    getReviewSkill: (issue, _prd, _agent) => `You are a Senior Engineer acting as a code reviewer.
 Your job is to review the code changes implemented in this branch for the issue #${issue.number}.
 Ensure the changes satisfy the primary requirements, are bug-free, and follow best practices.
 If you find any issues, use your tools to fix them and verify they work.
 Do not ask for permission. Fix problems directly.`,
   }
 
-  const pwdConfigPath = resolve(process.cwd(), '.agenTica.js')
-  const rootConfigPath = resolve(ROOT, '.agenTica.js')
-  const configPath = existsSync(pwdConfigPath)
-    ? pwdConfigPath
-    : existsSync(rootConfigPath)
-      ? rootConfigPath
+  // Resolve config path — .agenTica.ts takes precedence over .agenTica.js
+  const pwdTsConfigPath = resolve(process.cwd(), '.agenTica.ts')
+  const rootTsConfigPath = resolve(ROOT, '.agenTica.ts')
+  const pwdJsConfigPath = resolve(process.cwd(), '.agenTica.js')
+  const rootJsConfigPath = resolve(ROOT, '.agenTica.js')
+
+  const tsConfigPath = existsSync(pwdTsConfigPath)
+    ? pwdTsConfigPath
+    : existsSync(rootTsConfigPath)
+      ? rootTsConfigPath
       : null
+  const jsConfigPath = existsSync(pwdJsConfigPath)
+    ? pwdJsConfigPath
+    : existsSync(rootJsConfigPath)
+      ? rootJsConfigPath
+      : null
+  const configPath = tsConfigPath || jsConfigPath
+  const isTs = !!tsConfigPath
 
   let userConfig = {}
   if (configPath) {
     try {
-      const imported = await import(`file://${configPath}`)
-      userConfig = imported.default || imported
+      let imported
+      if (isTs) {
+        // Try tsx/esm/api first (tsImport handles transpilation without a pre-loaded loader)
+        let loaded = false
+        try {
+          const { tsImport } = await import('tsx/esm/api')
+          imported = await tsImport(`file://${configPath}`, import.meta.url)
+          loaded = true
+        } catch {}
+
+        if (!loaded) {
+          // Fallback to @swc-node/register
+          try {
+            await import('@swc-node/register/esm')
+            imported = await import(`file://${configPath}`)
+            loaded = true
+          } catch {}
+        }
+
+        if (!loaded) {
+          console.warn(
+            `Warning: .agenTica.ts found at ${configPath} but neither 'tsx' nor '@swc-node/register' ` +
+              `is available. Install one of them (npm install -D tsx) to use TypeScript config. Falling back to defaults.`,
+          )
+        }
+      } else {
+        imported = await import(`file://${configPath}`)
+      }
+      if (imported) {
+        userConfig = imported.default ?? imported
+      }
     } catch (err) {
       console.warn(`Warning: Failed to load config from ${configPath}: ${err.message}`)
     }
   }
 
-  // Handle env var legacy / simplicity
-  const pollInterval = Number(
-    process.env.POLL_INTERVAL_MS ?? userConfig.POLL_INTERVAL_MS ?? globalDefaults.POLL_INTERVAL_MS,
+  const pollIntervalMs = Number(
+    process.env.POLL_INTERVAL_MS ?? userConfig.pollIntervalMs ?? globalDefaults.pollIntervalMs,
   )
-  const logFile = process.env.LOG_FILE ?? userConfig.LOG_FILE ?? globalDefaults.LOG_FILE
-  const disableReview = process.env.DISABLE_REVIEW === 'true' || userConfig.disableReview === true || globalDefaults.disableReview
+  const logFile = process.env.LOG_FILE ?? userConfig.logFile ?? globalDefaults.logFile
+  const disableReview =
+    process.env.DISABLE_REVIEW === 'true' ||
+    userConfig.disableReview === true ||
+    globalDefaults.disableReview
 
   // Resolve agents mapping
   const agents = userConfig.agents || {
@@ -164,35 +207,44 @@ Do not ask for permission. Fix problems directly.`,
       ...agentDefaults,
       ...userConfig,
       ...a,
-      LABELS: {
-        ...agentDefaults.LABELS,
-        ...(userConfig.LABELS || {}),
-        ...(a.LABELS || {}),
+      labels: {
+        ...agentDefaults.labels,
+        ...(userConfig.labels || {}),
+        ...(a.labels || {}),
       },
     }
   }
 
+  // Bootstrap hookable
+  const hooks = createDaemonHooks()
+  hooks.addHooks(userConfig.hooks ?? {})
+
   return {
-    POLL_INTERVAL_MS: pollInterval,
-    LOG_FILE: logFile,
+    pollIntervalMs,
+    logFile,
     disableReview,
-    LABELS: {
-      ...agentDefaults.LABELS,
-      ...(userConfig.LABELS || {}),
+    labels: {
+      ...agentDefaults.labels,
+      ...(userConfig.labels || {}),
     },
     agents: resolvedAgents,
-    GET_AGENT:
-      userConfig.GET_AGENT ||
-      ((issue, agents, context = { step: 'coding' }) => {
-        // Default: use the first one available
+    getAgent:
+      userConfig.getAgent ||
+      ((_issue, agents, _context) => {
         const firstId = Object.keys(agents)[0]
         return agents[firstId]
       }),
-    GET_CODE_PROMPT: userConfig.GET_CODE_PROMPT !== undefined ? userConfig.GET_CODE_PROMPT : agentDefaults.GET_CODE_PROMPT,
-    GET_REVIEW_PROMPT: userConfig.GET_REVIEW_PROMPT !== undefined ? userConfig.GET_REVIEW_PROMPT : agentDefaults.GET_REVIEW_PROMPT,
-    PICKER: userConfig.PICKER || agentDefaults.PICKER,
-    QUERY: userConfig.QUERY || agentDefaults.QUERY,
-    IS_BLOCKED: userConfig.IS_BLOCKED || agentDefaults.IS_BLOCKED,
+    getCodePrompt:
+      userConfig.getCodePrompt !== undefined ? userConfig.getCodePrompt : agentDefaults.getCodePrompt,
+    getReviewSkill:
+      userConfig.getReviewSkill !== undefined
+        ? userConfig.getReviewSkill
+        : agentDefaults.getReviewSkill,
+    pickIssue: userConfig.pickIssue || agentDefaults.pickIssue,
+    buildQuery: userConfig.buildQuery || agentDefaults.buildQuery,
+    isBlocked: userConfig.isBlocked || agentDefaults.isBlocked,
+    hooks,
+    userConfig,
   }
 }
 
@@ -206,10 +258,10 @@ function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}`
   console.log(line)
   try {
-    const prev = existsSync(CONFIG.LOG_FILE) ? readFileSync(CONFIG.LOG_FILE, 'utf8') : ''
+    const prev = existsSync(CONFIG.logFile) ? readFileSync(CONFIG.logFile, 'utf8') : ''
     const lines = prev.split('\n').slice(-999)
     lines.push(line)
-    writeFileSync(CONFIG.LOG_FILE, lines.join('\n') + '\n')
+    writeFileSync(CONFIG.logFile, lines.join('\n') + '\n')
   } catch {}
 }
 
@@ -253,20 +305,20 @@ function shouldSkip(issue) {
 
 function warnConflictingLabels() {
   const conflicts = gh(
-    `issue list --search "is:issue is:open label:${CONFIG.LABELS.ready} label:${CONFIG.LABELS.question}" --json number,title`,
+    `issue list --search "is:issue is:open label:${CONFIG.labels.ready} label:${CONFIG.labels.question}" --json number,title`,
     true,
   )
   if (conflicts && conflicts.length > 0) {
     for (const c of conflicts) {
       log(
-        `\u26a0 WARNING: Issue #${c.number} (${c.title}) has both '${CONFIG.LABELS.ready}' and '${CONFIG.LABELS.question}' \u2014 ignored until '${CONFIG.LABELS.question}' is removed.`,
+        `\u26a0 WARNING: Issue #${c.number} (${c.title}) has both '${CONFIG.labels.ready}' and '${CONFIG.labels.question}' \u2014 ignored until '${CONFIG.labels.question}' is removed.`,
       )
     }
   }
 }
 
 async function getReadyIssues() {
-  const query = CONFIG.QUERY(CONFIG.LABELS)
+  const query = CONFIG.buildQuery(CONFIG.labels)
   const issues = gh(
     `issue list --search "${query}" --limit 50 --json number,title,labels,body,url`,
     true,
@@ -282,7 +334,7 @@ async function getReadyIssues() {
     if (shouldSkip(issue)) continue
 
     // --- Blocker Detection (Configurable) ---
-    if (CONFIG.IS_BLOCKED(issue, gh)) {
+    if (CONFIG.isBlocked(issue, gh)) {
       log(`Skipping #${issue.number} \u2014 it is blocked.`)
       continue
     }
@@ -312,7 +364,7 @@ async function getReadyIssues() {
 }
 
 async function hasInProgressIssue() {
-  const query = `is:issue is:open label:${CONFIG.LABELS.inProgress}`
+  const query = `is:issue is:open label:${CONFIG.labels.inProgress}`
   const issues = gh(`issue list --search "${query}" --json number,title`, true)
   if (issues && issues.length > 0) {
     log(
@@ -475,7 +527,7 @@ function slugify(str) {
 }
 
 function branchName(agent, issue) {
-  const prefix = agent.BRANCH_PREFIX || 'claude-'
+  const prefix = agent.branchPrefix || 'claude-'
   return `${prefix}${issue.number}-${slugify(issue.title)}`
 }
 
@@ -694,8 +746,8 @@ function buildPrompt(agent, issue, branch, baseBranch, defaultBranch, step = 'co
     }
   }
 
-  if (!workflow && agent.GET_SKILL) {
-    workflow = agent.GET_SKILL(agent, issue) ?? ''
+  if (!workflow && agent.getSkill) {
+    workflow = agent.getSkill(agent, issue) ?? ''
   }
 
   const persona = agent.prompt ? `## Persona\n${agent.prompt}\n\n` : ''
@@ -703,10 +755,10 @@ function buildPrompt(agent, issue, branch, baseBranch, defaultBranch, step = 'co
   const modelPrompt = `${persona}${skill}`
 
   let rootPrompt = ''
-  if (step === 'review' && CONFIG.GET_REVIEW_PROMPT) {
-    rootPrompt = typeof CONFIG.GET_REVIEW_PROMPT === 'function' ? CONFIG.GET_REVIEW_PROMPT(issue, prd, agent) : CONFIG.GET_REVIEW_PROMPT
-  } else if (step === 'coding' && CONFIG.GET_CODE_PROMPT) {
-    rootPrompt = typeof CONFIG.GET_CODE_PROMPT === 'function' ? CONFIG.GET_CODE_PROMPT(issue, prd, agent) : CONFIG.GET_CODE_PROMPT
+  if (step === 'review' && CONFIG.getReviewSkill) {
+    rootPrompt = typeof CONFIG.getReviewSkill === 'function' ? CONFIG.getReviewSkill(issue, prd, agent) : CONFIG.getReviewSkill
+  } else if (step === 'coding' && CONFIG.getCodePrompt) {
+    rootPrompt = typeof CONFIG.getCodePrompt === 'function' ? CONFIG.getCodePrompt(issue, prd, agent) : CONFIG.getCodePrompt
   }
 
   const combined = rootPrompt ? `${rootPrompt}\n\n${modelPrompt}` : modelPrompt
@@ -804,11 +856,11 @@ function disableSleepPrevention() {
 
 function spawnAgent(agent, issue, prompt) {
   return new Promise((resolve, reject) => {
-    const model = agent.GET_MODEL(agent, issue)
-    const args = typeof agent.ARGS === 'function' ? agent.ARGS(agent, model) : agent.ARGS
-    log(`Spawning ${agent.COMMAND} ${args.join(' ')} (model: ${model}) ...`)
+    const model = agent.getModel(agent, issue)
+    const args = typeof agent.args === 'function' ? agent.args(agent, model) : agent.args
+    log(`Spawning ${agent.command} ${args.join(' ')} (model: ${model}) ...`)
 
-    const child = spawn(agent.COMMAND, args, {
+    const child = spawn(agent.command, args, {
       cwd: ROOT,
       env: { ...process.env, ANTHROPIC_API_KEY: undefined },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -824,14 +876,14 @@ function spawnAgent(agent, issue, prompt) {
       process.stdout.write(d)
       stdout += d
       try {
-        writeFileSync(CONFIG.LOG_FILE, d, { flag: 'a' })
+        writeFileSync(CONFIG.logFile, d, { flag: 'a' })
       } catch {}
     })
     child.stderr.on('data', (d) => {
       process.stderr.write(d)
       stderr += d
       try {
-        writeFileSync(CONFIG.LOG_FILE, d, { flag: 'a' })
+        writeFileSync(CONFIG.logFile, d, { flag: 'a' })
       } catch {}
     })
     child.on('close', (code) => {
@@ -840,7 +892,7 @@ function spawnAgent(agent, issue, prompt) {
         resolve(stdout)
       } else {
         const tail = stderr.trim().split('\n').slice(-10).join('\n')
-        const err = new Error(`${agent.COMMAND} exited ${code}`)
+        const err = new Error(`${agent.command} exited ${code}`)
         err.stderr = tail
         reject(err)
       }
@@ -875,12 +927,12 @@ async function validateLabels() {
   }
   const allLabels = new Set()
   for (const agent of Object.values(CONFIG.agents)) {
-    for (const label of Object.values(agent.LABELS)) {
+    for (const label of Object.values(agent.labels)) {
       allLabels.add(label)
     }
   }
   // Include global labels
-  for (const label of Object.values(CONFIG.LABELS)) {
+  for (const label of Object.values(CONFIG.labels)) {
     allLabels.add(label)
   }
 
@@ -915,7 +967,7 @@ async function tick() {
     return
   }
 
-  const issue = CONFIG.PICKER(issues)
+  const issue = CONFIG.pickIssue(issues)
   if (!issue) {
     log('Picker returned no issue — nothing to do.')
     return
@@ -925,10 +977,10 @@ async function tick() {
   const prdInfo = getPrdInfo(issue, gh)
 
   // 4. Select Agent(s)
-  const agentSelection = await CONFIG.GET_AGENT(issue, CONFIG.agents, { step: 'coding', prdInfo })
+  const agentSelection = await CONFIG.getAgent(issue, CONFIG.agents, { step: 'coding', prdInfo })
   const agents = Array.isArray(agentSelection) ? agentSelection : [agentSelection]
   if (agents.length === 0 || !agents[0]) {
-    log('GET_AGENT returned no agent — skipping issue.')
+    log('getAgent returned no agent — skipping issue.')
     return
   }
 
@@ -937,10 +989,10 @@ async function tick() {
 
   for (let i = 0; i < agents.length; i++) {
     const agent = agents[i]
-    log(`Attempting agent ${i + 1}/${agents.length}: ${agent.name || 'unnamed'} via ${agent.COMMAND} ...`)
+    log(`Attempting agent ${i + 1}/${agents.length}: ${agent.name || 'unnamed'} via ${agent.command} ...`)
 
     // 5a. Claim/Prepare the issue for THIS agent
-    const labels = agent.LABELS || CONFIG.LABELS
+    const labels = agent.labels || CONFIG.labels
     await swapLabels(issue.number, labels.ready, labels.inProgress)
 
     // 5b. Ensure clean git state
@@ -960,15 +1012,15 @@ async function tick() {
 
     if (!isRevision) {
       try {
-        baseBranch = await agent.GET_BASE_BRANCH(issue, gh, defaultBranch)
+        baseBranch = await agent.getBaseBranch(issue, gh, defaultBranch)
         if (!baseBranch) baseBranch = defaultBranch
       } catch (err) {
-        log(`WARNING: GET_BASE_BRANCH failed: ${err.message}. Using default.`)
+        log(`WARNING: getBaseBranch failed: ${err.message}. Using default.`)
       }
 
       if (!ensureBranchExistsRemotely(baseBranch, defaultBranch)) {
         log(`ERROR: Base branch ${baseBranch} could not be ensured.`)
-        await swapLabels(issue.number, agent.LABELS.inProgress, agent.LABELS.fixme)
+        await swapLabels(issue.number, agent.labels.inProgress, agent.labels.fixme)
         await addComment(issue.number, `🤖 **Cannot start** \u2014 failed to setup base branch \`${baseBranch}\`. Marked as fixme.`)
         return
       }
@@ -987,7 +1039,7 @@ async function tick() {
     cleanPrMeta()
     try {
       const output = await spawnAgent(agent, issue, prompt)
-      log(`${agent.COMMAND} finished successfully.`)
+      log(`${agent.command} finished successfully.`)
 
       if (output.includes('CLARIFICATION_REQUESTED')) {
         log('Clarification needed \u2014 swapping to question.')
@@ -1005,11 +1057,11 @@ async function tick() {
             await addComment(issue.number, `🤖 **Note:** Auto-committed some leftover uncommitted files to \`${branch}\` before pushing.`)
           }
 
-          if (!isRevision && !CONFIG.disableReview && CONFIG.GET_REVIEW_PROMPT) {
+          if (!isRevision && !CONFIG.disableReview && CONFIG.getReviewSkill) {
              log('Review step is configured and enabled. Starting review phase.')
              await addComment(issue.number, `🤖 **Starting code review.**`)
-             
-             const reviewAgentSelection = await CONFIG.GET_AGENT(issue, CONFIG.agents, { step: 'review', prdInfo })
+
+             const reviewAgentSelection = await CONFIG.getAgent(issue, CONFIG.agents, { step: 'review', prdInfo })
              const reviewAgents = Array.isArray(reviewAgentSelection) ? reviewAgentSelection : [reviewAgentSelection]
              
              let reviewSuccess = false
@@ -1018,12 +1070,12 @@ async function tick() {
                const revAgent = reviewAgents[j];
                if (!revAgent) continue;
                
-               log(`Running review agent ${j + 1}/${reviewAgents.length}: ${revAgent.name || revAgent.COMMAND}...`)
+               log(`Running review agent ${j + 1}/${reviewAgents.length}: ${revAgent.name || revAgent.command}...`)
                const reviewPrompt = buildPrompt(revAgent, issue, branch, baseBranch, defaultBranch, 'review', prdInfo)
                
                try {
                  const revOutput = await spawnAgent(revAgent, issue, reviewPrompt)
-                 log(`${revAgent.COMMAND} review completed successfully.`)
+                 log(`${revAgent.command} review completed successfully.`)
                  if (revOutput.includes('CLARIFICATION_REQUESTED')) {
                     log('Review step requested clarification.');
                     await addComment(issue.number, `🤖 **Note:** Code review requested clarification. Continuing with push anyway.`);
@@ -1068,7 +1120,7 @@ async function tick() {
             await addComment(issue.number, '🤖 Implementation complete but PR metadata file not found. Generating default PR details.\nBranch: `' + branch + '`')
             meta = {
               title: `Fixes #${issue.number}: ${issue.title} [#${issue.number}]`,
-              body: `Fixes #${issue.number}\n\nAutomated PR generated by \`${agent.COMMAND}\`.`
+              body: `Fixes #${issue.number}\n\nAutomated PR generated by \`${agent.command}\`.`
             }
           }
 
@@ -1115,7 +1167,7 @@ async function tick() {
       success = true
       break
     } catch (err) {
-      log(`ERROR during ${agent.COMMAND} run: ${err.message}`)
+      log(`ERROR during ${agent.command} run: ${err.message}`)
       if (i < agents.length - 1) {
         log(`Attempt ${i + 1} failed. Powering through to next agent...`)
         try { execSync('git reset --hard && git clean -fd', { cwd: ROOT }) } catch {}
@@ -1124,7 +1176,7 @@ async function tick() {
       // Ultimate failure
       await swapLabels(issue.number, [labels.inProgress, labels.ready], labels.fixme)
       const details = err.stderr ? `\n\n\`\`\`\n${err.stderr}\n\`\`\`` : ''
-      await addComment(issue.number, `🤖 **All agents failed** \u2014 marked as fixme.\n\nError from last attempt (${agent.COMMAND}): ${err.message}${details}`)
+      await addComment(issue.number, `🤖 **All agents failed** \u2014 marked as fixme.\n\nError from last attempt (${agent.command}): ${err.message}${details}`)
     }
   }
 
@@ -1141,7 +1193,7 @@ let logTailRenderedCount = 0 // how many lines are currently occupying the termi
 
 function getLastLogLines() {
   try {
-    const content = existsSync(CONFIG.LOG_FILE) ? readFileSync(CONFIG.LOG_FILE, 'utf8') : ''
+    const content = existsSync(CONFIG.logFile) ? readFileSync(CONFIG.logFile, 'utf8') : ''
     const all = content.split('\n').filter(Boolean)
     const tail = all.slice(-LOG_TAIL_LINES)
     // Pad top with empty lines so the block is always exactly LOG_TAIL_LINES tall
@@ -1192,11 +1244,23 @@ async function main() {
   CONFIG = await loadConfig()
   enableSleepPrevention()
   log('\u2501\u2501\u2501 GitHub daemon started \u2501\u2501\u2501')
-  log(`Poll: every ${CONFIG.POLL_INTERVAL_MS / 1000}s`)
-  log(`Agents: ${Object.values(CONFIG.agents).map((a) => a.COMMAND).join(', ')}`)
+  log(`Poll: every ${CONFIG.pollIntervalMs / 1000}s`)
+  log(`Agents: ${Object.values(CONFIG.agents).map((a) => a.command).join(', ')}`)
   log(`Repo: ${ROOT}`)
-  log(`Logs: ${CONFIG.LOG_FILE}`)
+  log(`Logs: ${CONFIG.logFile}`)
   log('Press Ctrl-C to stop.')
+
+  if (CONFIG.userConfig.onStart) {
+    try {
+      await CONFIG.userConfig.onStart({
+        pollIntervalMs: CONFIG.pollIntervalMs,
+        logFile: CONFIG.logFile,
+        agents: Object.keys(CONFIG.agents),
+      })
+    } catch (err) {
+      log(`Warning: onStart failed: ${err.message}`)
+    }
+  }
 
   await validateLabels()
 
@@ -1208,15 +1272,22 @@ async function main() {
   }
 
   await runTick()
-  setInterval(runTick, CONFIG.POLL_INTERVAL_MS)
+  setInterval(runTick, CONFIG.pollIntervalMs)
 }
 
-function shutdown(signal) {
+async function shutdown(signal) {
   stopLogTail()
   log(`${signal} received \u2014 shutting down.`)
   if (activeChild) {
     log('Killing active claude subprocess...')
     activeChild.kill('SIGTERM')
+  }
+  if (CONFIG?.userConfig?.onStop) {
+    try {
+      await CONFIG.userConfig.onStop({ signal })
+    } catch (err) {
+      log(`Warning: onStop failed: ${err.message}`)
+    }
   }
   disableSleepPrevention()
   process.exit(0)

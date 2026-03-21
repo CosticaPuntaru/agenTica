@@ -5,13 +5,14 @@
   "main": "index.js",
   "scripts": {
     "test": "vitest run",
-    "autobot": "node github-auto-implement/resources/scripts/github-daemon.mjs"
+    "autobot": "node --import tsx/esm github-auto-implement/resources/scripts/github-daemon.mjs"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "hookable": "^6.1.0",
+    "tsx": "^4.0.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
