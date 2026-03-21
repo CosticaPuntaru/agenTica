@@ -20,7 +20,9 @@ node resources/scripts/github-daemon.mjs
 The daemon will poll for `ready` issues (defined in `.agenTica.js`, default: `autobot:ready`) and execute this workflow autonomously.
 
 ### Optional Configuration
-Create a `.agenTica.js` in your current working directory to customize the experience. Use it to switch between GitHub/GitLab styles or override default constants.
+Create a `.agenTica.ts` (or `.agenTica.js`) in your project root to customize how issues are picked, how base branches are resolved, and switch between agents or models dynamically.
+
+See the [agenTica.sample.ts](../../agenTica.sample.ts) in the repo root for a full list of over 40 lifecycle hooks used by this workflow.
 
 ## Step 1: Find the Next Issue
 
