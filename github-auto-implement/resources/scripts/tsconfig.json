@@ -11,6 +11,8 @@
   },
   "include": [
     "types.ts",
-    "schemas.ts"
+    "schemas.ts",
+    "lifecycle.ts",
+    "lifecycle.test.ts"
   ]
 }
