@@ -6,7 +6,8 @@
   "main": "index.js",
   "scripts": {
     "test": "vitest run",
-    "autobot": "node --import tsx/esm github-auto-implement/resources/scripts/github-daemon.mjs"
+    "autobot": "node --import tsx/esm github-auto-implement/resources/scripts/github-daemon.mjs",
+    "skills": "npx skills add ./github-auto-implement --agent antigravity --agent claude-code -y"
   },
   "keywords": [],
   "author": "",

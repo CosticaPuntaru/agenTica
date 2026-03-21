@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "rootDir": "."
+  },
+  "include": [
+    "types.ts",
+    "schemas.ts",
+    "lifecycle.ts",
+    "lifecycle.test.ts"
+  ]
+}
