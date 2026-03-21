@@ -35,6 +35,7 @@ async function loadConfig() {
   const globalDefaults = {
     POLL_INTERVAL_MS: 300_000,
     LOG_FILE: resolve(ROOT, 'tmp/github-daemon.log'),
+    disableReview: false,
   }
 
   const agentDefaults = {
@@ -120,6 +121,12 @@ async function loadConfig() {
       const models = agent.MODELS || [agent.MODEL]
       return models[Math.floor(Math.random() * models.length)]
     },
+    GET_CODE_PROMPT: (issue, prd, agent) => '',
+    GET_REVIEW_PROMPT: (issue, prd, agent) => `You are a Senior Engineer acting as a code reviewer.
+Your job is to review the code changes implemented in this branch for the issue #${issue.number}.
+Ensure the changes satisfy the primary requirements, are bug-free, and follow best practices.
+If you find any issues, use your tools to fix them and verify they work.
+Do not ask for permission. Fix problems directly.`,
   }
 
   const pwdConfigPath = resolve(process.cwd(), '.agenTica.js')
@@ -145,6 +152,7 @@ async function loadConfig() {
     process.env.POLL_INTERVAL_MS ?? userConfig.POLL_INTERVAL_MS ?? globalDefaults.POLL_INTERVAL_MS,
   )
   const logFile = process.env.LOG_FILE ?? userConfig.LOG_FILE ?? globalDefaults.LOG_FILE
+  const disableReview = process.env.DISABLE_REVIEW === 'true' || userConfig.disableReview === true || globalDefaults.disableReview
 
   // Resolve agents mapping
   const agents = userConfig.agents || {
@@ -167,6 +175,7 @@ async function loadConfig() {
   return {
     POLL_INTERVAL_MS: pollInterval,
     LOG_FILE: logFile,
+    disableReview,
     LABELS: {
       ...agentDefaults.LABELS,
       ...(userConfig.LABELS || {}),
@@ -179,8 +188,8 @@ async function loadConfig() {
         const firstId = Object.keys(agents)[0]
         return agents[firstId]
       }),
-    GET_CODE_PROMPT: userConfig.GET_CODE_PROMPT || (() => ''),
-    GET_REVIEW_PROMPT: userConfig.GET_REVIEW_PROMPT || null,
+    GET_CODE_PROMPT: userConfig.GET_CODE_PROMPT !== undefined ? userConfig.GET_CODE_PROMPT : agentDefaults.GET_CODE_PROMPT,
+    GET_REVIEW_PROMPT: userConfig.GET_REVIEW_PROMPT !== undefined ? userConfig.GET_REVIEW_PROMPT : agentDefaults.GET_REVIEW_PROMPT,
     PICKER: userConfig.PICKER || agentDefaults.PICKER,
     QUERY: userConfig.QUERY || agentDefaults.QUERY,
     IS_BLOCKED: userConfig.IS_BLOCKED || agentDefaults.IS_BLOCKED,
@@ -996,8 +1005,8 @@ async function tick() {
             await addComment(issue.number, `🤖 **Note:** Auto-committed some leftover uncommitted files to \`${branch}\` before pushing.`)
           }
 
-          if (!isRevision && CONFIG.GET_REVIEW_PROMPT) {
-             log('Review step is configured. Starting review phase.')
+          if (!isRevision && !CONFIG.disableReview && CONFIG.GET_REVIEW_PROMPT) {
+             log('Review step is configured and enabled. Starting review phase.')
              await addComment(issue.number, `🤖 **Starting code review.**`)
              
              const reviewAgentSelection = await CONFIG.GET_AGENT(issue, CONFIG.agents, { step: 'review', prdInfo })
