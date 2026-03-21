@@ -10,7 +10,7 @@
     "rootDir": "."
   },
   "include": [
-    "types.d.ts",
+    "types.ts",
     "schemas.ts"
   ]
 }
