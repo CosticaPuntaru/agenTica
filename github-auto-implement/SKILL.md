@@ -59,7 +59,7 @@ gh issue list --search 'is:open is:issue label:autobot:ready -label:autobot:ques
 Instead of jumping into code, investigate the issue formally.
 - **Skill**: `triage-issue`
 - **Action**: Run `triage-issue` on the picked ticket. Identify the root cause, establish a reproduction case, and draft a TDD-based fix plan. 
-- **Checkpoint**: Save the triage result to `.agents/triage/{{ISSUE_ID}}.md`.
+- **Checkpoint**: Save the triage result to `github-auto-implement/tmp/triage/{{ISSUE_ID}}.md`.
 
 ## Step 4: Implementation (TDD Phase)
 
@@ -77,7 +77,7 @@ Ensure the implementation meets project standards.
 
 1. **Commit**: `git commit -m "Fixes #{{ISSUE_ID}}: {{ISSUE_TITLE}}"`
 2. **Push**: `git push -u origin {{BRANCH_NAME}}`
-3. **Write PR metadata** to `./tmp/pr-meta.json` (the daemon will create the PR):
+3. **Write PR metadata** to `github-auto-implement/tmp/pr-meta.json` (the daemon will create the PR):
    ```json
    {
      "title": "Fixes #{{ISSUE_ID}}: {{ISSUE_TITLE}} [#{{ISSUE_ID}}]",

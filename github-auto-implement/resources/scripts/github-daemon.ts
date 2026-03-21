@@ -16,7 +16,7 @@
  *   CLAUDE_MODEL        Model to use            (default: "sonnet")
  */
 
-import { spawn, execSync } from 'child_process'
+import { spawn, execSync, ChildProcess } from 'child_process'
 import {
   existsSync,
   readFileSync,
@@ -26,20 +26,49 @@ import {
 } from 'fs'
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
-import { createDaemonHooks, callStep } from './lifecycle.js'
+import { createDaemonHooks, callStep } from './lifecycle'
+import type { Hookable } from 'hookable'
+import type {
+  AgenTicaConfig,
+  AgenTicaHookMap,
+  AgentConfig,
+  GitHubIssue,
+  GitHubPR,
+  LabelConfig,
+  GhFunction,
+  AgentSelectionContext,
+} from './types'
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
+const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url))
+const SKILL_TMP_DIR = resolve(SCRIPTS_DIR, '../../tmp')
 
-async function loadConfig() {
+function findProjectRoot(): string {
+  let curr = SCRIPTS_DIR
+  while (curr !== dirname(curr)) {
+    if (existsSync(resolve(curr, 'package.json')) && !curr.includes('github-auto-implement')) return curr
+    curr = dirname(curr)
+  }
+  return SCRIPTS_DIR // fallback
+}
+const PROJECT_ROOT = findProjectRoot()
+
+async function loadConfig(): Promise<AgenTicaConfig & {
+  userConfig: AgenTicaConfig;
+  hooks: Hookable<AgenTicaHookMap>;
+  logFile: string;
+  pollIntervalMs: number;
+  labels: LabelConfig;
+  agents: Record<string, AgentConfig>;
+}> {
   const globalDefaults = {
     pollIntervalMs: 300_000,
-    logFile: resolve(ROOT, 'tmp/github-daemon.log'),
+    logFile: resolve(SKILL_TMP_DIR, 'github-daemon.log'),
     disableReview: false,
   }
 
-  const agentDefaults = {
+  const agentDefaults: Partial<AgentConfig> = {
     command: 'claude',
     model: 'sonnet',
     skillFile: resolve(dirname(fileURLToPath(import.meta.url)), '../../SKILL.md'),
@@ -51,25 +80,25 @@ async function loadConfig() {
       fixme: 'autobot:fixme',
       reviewSkipped: 'autobot:reviewSkipped',
     },
-    buildQuery: (labels) =>
+    buildQuery: (labels: LabelConfig) =>
       `is:issue is:open label:"${labels.ready}" -label:"${labels.question}" -label:"${labels.inProgress}"`,
-    pickIssue: (issues) => issues[0],
-    isBlocked: (issue, gh) => {
+    pickIssue: (issues: GitHubIssue[]) => issues[0],
+    isBlocked: (issue: GitHubIssue, gh: GhFunction) => {
       const body = issue.body ?? ''
       const blockerRegex = /Blocked by\s+(?:#|https:\/\/github\.com\/\S+\/issues\/)(\d+)/gi
       let match
       while ((match = blockerRegex.exec(body)) !== null) {
         const blockerNum = match[1]
-        const blockerInfo = gh(`issue view ${blockerNum} --json state`, true)
+        const blockerInfo = gh(`issue view ${blockerNum} --json state`, true) as { state: string } | null
         if (blockerInfo && blockerInfo.state === 'OPEN') {
           // Allow if the blocker has an open PR
-          const prs = gh(`pr list --search "[#${blockerNum}]" --state open --json number`, true)
+          const prs = gh(`pr list --search "[#${blockerNum}]" --state open --json number`, true) as any[] | null
           if (!prs || prs.length === 0) return true
         }
       }
       return false
     },
-    getBaseBranch: (issue, gh, defaultBranch) => {
+    getBaseBranch: (issue: GitHubIssue, gh: GhFunction, defaultBranch: string) => {
       const body = issue.body ?? ''
 
       // Determine if there is a Parent PRD to fall back to instead of defaultBranch
@@ -78,7 +107,7 @@ async function loadConfig() {
       const epicMatch = epicRegex.exec(body)
       if (epicMatch) {
         const epicNum = epicMatch[1]
-        const epicInfo = gh(`issue view ${epicNum} --json title,state`, true)
+        const epicInfo = gh(`issue view ${epicNum} --json title,state`, true) as { title: string } | null
         if (epicInfo && epicInfo.title) {
           fallbackBranch = `epic/${epicNum}-${slugify(epicInfo.title)}`
         }
@@ -91,7 +120,7 @@ async function loadConfig() {
         const prs = gh(
           `pr list --search "[#${blockerNum}]" --state open --json headRefName,title,body`,
           true,
-        )
+        ) as any[] | null
         if (prs && prs.length > 0) {
           const exactFound = prs.find((pr) => pr.title.includes(`[#${blockerNum}]`))
           if (exactFound) return exactFound.headRefName
@@ -108,7 +137,7 @@ async function loadConfig() {
       return fallbackBranch
     },
     branchPrefix: 'autobot/',
-    getSkill: (agent, _issue) => {
+    getSkill: (agent: AgentConfig, _issue: GitHubIssue) => {
       if (agent.promptFile && existsSync(agent.promptFile)) {
         return readFileSync(agent.promptFile, 'utf8')
       }
@@ -117,13 +146,13 @@ async function loadConfig() {
       }
       return ''
     },
-    args: (agent, model) => ['--print', '--dangerously-skip-permissions', '--model', model],
-    getModel: (agent, _issue) => {
+    args: (agent: AgentConfig, model: string) => ['--print', '--dangerously-skip-permissions', '--model', model],
+    getModel: (agent: AgentConfig, _issue: GitHubIssue) => {
       const models = agent.models || [agent.model]
       return models[Math.floor(Math.random() * models.length)]
     },
-    getCodePrompt: (_issue, _prd, _agent) => '',
-    getReviewSkill: (issue, _prd, _agent) => `You are a Senior Engineer acting as a code reviewer.
+    getCodePrompt: (_issue: GitHubIssue, _prd: GitHubIssue | null, _agent: AgentConfig) => '',
+    getReviewSkill: (issue: GitHubIssue, _prd: GitHubIssue | null, _agent: AgentConfig) => `You are a Senior Engineer acting as a code reviewer.
 Your job is to review the code changes implemented in this branch for the issue #${issue.number}.
 Ensure the changes satisfy the primary requirements, are bug-free, and follow best practices.
 If you find any issues, use your tools to fix them and verify they work.
@@ -132,9 +161,9 @@ Do not ask for permission. Fix problems directly.`,
 
   // Resolve config path — .agenTica.ts takes precedence over .agenTica.js
   const pwdTsConfigPath = resolve(process.cwd(), '.agenTica.ts')
-  const rootTsConfigPath = resolve(ROOT, '.agenTica.ts')
+  const rootTsConfigPath = resolve(PROJECT_ROOT, '.agenTica.ts')
   const pwdJsConfigPath = resolve(process.cwd(), '.agenTica.js')
-  const rootJsConfigPath = resolve(ROOT, '.agenTica.js')
+  const rootJsConfigPath = resolve(PROJECT_ROOT, '.agenTica.js')
 
   const tsConfigPath = existsSync(pwdTsConfigPath)
     ? pwdTsConfigPath
@@ -149,10 +178,10 @@ Do not ask for permission. Fix problems directly.`,
   const configPath = tsConfigPath || jsConfigPath
   const isTs = !!tsConfigPath
 
-  let userConfig = {}
+  let userConfig: AgenTicaConfig = {}
   if (configPath) {
     try {
-      let imported
+      let imported: any
       if (isTs) {
         // Try tsx/esm/api first (tsImport handles transpilation without a pre-loaded loader)
         let loaded = false
@@ -165,7 +194,7 @@ Do not ask for permission. Fix problems directly.`,
         if (!loaded) {
           // Fallback to @swc-node/register
           try {
-            await import('@swc-node/register/esm')
+            await import('@swc-node/register/esm' as any)
             imported = await import(`file://${configPath}`)
             loaded = true
           } catch {}
@@ -183,7 +212,7 @@ Do not ask for permission. Fix problems directly.`,
       if (imported) {
         userConfig = imported.default ?? imported
       }
-    } catch (err) {
+    } catch (err: any) {
       console.warn(`Warning: Failed to load config from ${configPath}: ${err.message}`)
     }
   }
@@ -198,21 +227,21 @@ Do not ask for permission. Fix problems directly.`,
     globalDefaults.disableReview
 
   // Resolve agents mapping
-  const agents = userConfig.agents || {
+  const agentsMap = userConfig.agents || {
     default: { ...agentDefaults, ...userConfig },
   }
-  const resolvedAgents = {}
-  for (const [id, a] of Object.entries(agents)) {
+  const resolvedAgents: Record<string, AgentConfig> = {}
+  for (const [id, a] of Object.entries(agentsMap)) {
     resolvedAgents[id] = {
       ...agentDefaults,
       ...userConfig,
       ...a,
       labels: {
-        ...agentDefaults.labels,
+        ...(agentDefaults.labels as LabelConfig),
         ...(userConfig.labels || {}),
         ...(a.labels || {}),
       },
-    }
+    } as AgentConfig
   }
 
   // Bootstrap hookable
@@ -224,13 +253,13 @@ Do not ask for permission. Fix problems directly.`,
     logFile,
     disableReview,
     labels: {
-      ...agentDefaults.labels,
+      ...(agentDefaults.labels as LabelConfig),
       ...(userConfig.labels || {}),
     },
     agents: resolvedAgents,
     getAgent:
       userConfig.getAgent ||
-      ((_issue, agents, _context) => {
+      ((_issue: GitHubIssue, agents: Record<string, AgentConfig>, _context: AgentSelectionContext) => {
         const firstId = Object.keys(agents)[0]
         return agents[firstId]
       }),
@@ -248,16 +277,24 @@ Do not ask for permission. Fix problems directly.`,
   }
 }
 
-let CONFIG = null // To be initialized in main()
+let CONFIG: (AgenTicaConfig & {
+  hooks: Hookable<AgenTicaHookMap>;
+  userConfig: AgenTicaConfig;
+  logFile: string;
+  pollIntervalMs: number;
+  labels: LabelConfig;
+  agents: Record<string, AgentConfig>;
+}) | null = null
 
-mkdirSync(resolve(ROOT, 'tmp'), { recursive: true })
+mkdirSync(SKILL_TMP_DIR, { recursive: true })
 
 // ── Logger ────────────────────────────────────────────────────────────────────
 
-function log(msg) {
+function log(msg: string) {
   const line = `[${new Date().toISOString()}] ${msg}`
   console.log(line)
   try {
+    if (!CONFIG) return
     const prev = existsSync(CONFIG.logFile) ? readFileSync(CONFIG.logFile, 'utf8') : ''
     const lines = prev.split('\n').slice(-999)
     lines.push(line)
@@ -267,21 +304,21 @@ function log(msg) {
 
 // ── GitHub CLI ────────────────────────────────────────────────────────────────
 
-function gh(cmd, asJson = true) {
+function gh(cmd: string, asJson = true): any {
   try {
     const output = execSync(`gh ${cmd}`, {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     return asJson ? (output.trim() ? JSON.parse(output) : null) : output.trim()
-  } catch (err) {
+  } catch (err: any) {
     const stderr = err.stderr ? err.stderr.toString() : ''
     log(`gh error: command "gh ${cmd}" failed with: ${err.message}${stderr ? `\nStderr: ${stderr}` : ''}`)
     return null
   }
 }
 
-function shouldSkip(issue) {
+function shouldSkip(issue: GitHubIssue): boolean {
   if (
     issue.labels?.some((l) => {
       const name = l.name.toLowerCase()
@@ -304,10 +341,11 @@ function shouldSkip(issue) {
 }
 
 function warnConflictingLabels() {
+  if (!CONFIG) return
   const conflicts = gh(
     `issue list --search "is:issue is:open label:${CONFIG.labels.ready} label:${CONFIG.labels.question}" --json number,title`,
     true,
-  )
+  ) as any[] | null
   if (conflicts && conflicts.length > 0) {
     for (const c of conflicts) {
       log(
@@ -317,30 +355,32 @@ function warnConflictingLabels() {
   }
 }
 
-async function getReadyIssues() {
-  const ctxList = { query: CONFIG.buildQuery(CONFIG.labels) }
+async function getReadyIssues(): Promise<GitHubIssue[]> {
+  if (!CONFIG) return []
+  const ctxList = { query: CONFIG.buildQuery!(CONFIG.labels) }
   await callStep(CONFIG.hooks, 'preListIssues', ctxList)
 
   const rawIssues = gh(
     `issue list --search "${ctxList.query}" --limit 50 --json number,title,labels,body,url`,
     true,
-  )
+  ) as GitHubIssue[] | null
 
   if (!rawIssues) {
     log('Failed to fetch issues.')
     return []
   }
 
-  ctxList.issues = rawIssues
-  await callStep(CONFIG.hooks, 'postListIssues', ctxList)
-  const issues = ctxList.issues
+  const ctxListAny = ctxList as any
+  ctxListAny.issues = rawIssues
+  await callStep(CONFIG.hooks, 'postListIssues', ctxListAny)
+  const issues = ctxListAny.issues as GitHubIssue[]
 
-  const valid = []
+  const valid: GitHubIssue[] = []
   for (const issue of issues) {
     if (shouldSkip(issue)) continue
 
     // --- Blocker Detection (Configurable) ---
-    if (CONFIG.isBlocked(issue, gh)) {
+    if (CONFIG.isBlocked!(issue, gh)) {
       log(`Skipping #${issue.number} \u2014 it is blocked.`)
       continue
     }
@@ -349,11 +389,12 @@ async function getReadyIssues() {
     await callStep(CONFIG.hooks, 'preGetIssue', ctxGet)
 
     // Merge comments into the issue if they weren't fetched in the list view
-    const details = gh(`issue view ${ctxGet.issueNumber} --json comments`, true)
+    const details = gh(`issue view ${ctxGet.issueNumber} --json comments`, true) as { comments: any[] } | null
     
-    ctxGet.issue = { ...issue, ...details }
-    await callStep(CONFIG.hooks, 'postGetIssue', ctxGet)
-    const finalizedIssue = ctxGet.issue
+    const ctxGetAny = ctxGet as any
+    ctxGetAny.issue = { ...issue, ...details }
+    await callStep(CONFIG.hooks, 'postGetIssue', ctxGetAny)
+    const finalizedIssue = ctxGetAny.issue
 
     let commentSkip = false
     if (finalizedIssue.comments) {
@@ -378,9 +419,10 @@ async function getReadyIssues() {
   return valid
 }
 
-async function hasInProgressIssue() {
+async function hasInProgressIssue(): Promise<boolean> {
+  if (!CONFIG) return false
   const query = `is:issue is:open label:${CONFIG.labels.inProgress}`
-  const issues = gh(`issue list --search "${query}" --json number,title`, true)
+  const issues = gh(`issue list --search "${query}" --json number,title`, true) as any[] | null
   if (issues && issues.length > 0) {
     log(
       `In-progress issue exists: #${issues[0].number} (${issues[0].title}) \u2014 skipping.`,
@@ -390,7 +432,8 @@ async function hasInProgressIssue() {
   return false
 }
 
-async function swapLabels(issueNum, removeLs, addLs) {
+async function swapLabels(issueNum: number, removeLs: string | string[], addLs: string | string[]) {
+  if (!CONFIG) return
   const ctx = {
     issueNumber: issueNum,
     add: (Array.isArray(addLs) ? addLs : [addLs]).filter(Boolean),
@@ -411,19 +454,20 @@ async function swapLabels(issueNum, removeLs, addLs) {
   await callStep(CONFIG.hooks, 'postSetLabel', ctx)
 }
 
-function getRepoNameWithOwner() {
-  const repoObj = gh('repo view --json nameWithOwner', true)
-  return repoObj?.nameWithOwner
+function getRepoNameWithOwner(): string | null {
+  const repoObj = gh('repo view --json nameWithOwner', true) as { nameWithOwner: string } | null
+  return repoObj?.nameWithOwner ?? null
 }
 
-async function addComment(issueNum, body) {
+async function addComment(issueNum: number, body: string): Promise<number | null> {
+  if (!CONFIG) return null
   const ctx = { issueNumber: issueNum, body }
   await callStep(CONFIG.hooks, 'preAddComment', ctx)
 
   const repo = getRepoNameWithOwner()
   if (!repo) return null
 
-  const tmpFile = resolve(ROOT, `tmp/gh-comment-${Date.now()}.txt`)
+  const tmpFile = resolve(SKILL_TMP_DIR, `gh-comment-${Date.now()}.txt`)
   writeFileSync(tmpFile, ctx.body)
 
   try {
@@ -433,10 +477,11 @@ async function addComment(issueNum, body) {
     )
     const parsed = JSON.parse(res)
     unlinkSync(tmpFile)
-    ctx.commentId = parsed.id
-    await callStep(CONFIG.hooks, 'postAddComment', ctx)
+    const ctxAny = ctx as any
+    ctxAny.commentId = parsed.id
+    await callStep(CONFIG.hooks, 'postAddComment', ctxAny)
     return parsed.id
-  } catch (e) {
+  } catch (e: any) {
     if (existsSync(tmpFile)) unlinkSync(tmpFile)
     log(`Failed to add comment: ${e.message}`)
     return null
@@ -445,29 +490,29 @@ async function addComment(issueNum, body) {
 
 // ── Git preparation ──────────────────────────────────────────────────────────
 
-function getPrdInfo(issue, gh) {
+function getPrdInfo(issue: GitHubIssue, gh: GhFunction): GitHubIssue | null {
   const body = issue.body ?? ''
   const epicRegex = /Parent PRD:\s+(?:#|https:\/\/github\.com\/\S+\/issues\/)(\d+)/gi
   const epicMatch = epicRegex.exec(body)
   if (epicMatch) {
     const epicNum = epicMatch[1]
-    const epicInfo = gh(`issue view ${epicNum} --json title,body,state`, true)
+    const epicInfo = gh(`issue view ${epicNum} --json title,body,state`, true) as GitHubIssue | null
     return epicInfo
   }
   return null
 }
 
-function getDefaultBranch() {
+function getDefaultBranch(): string {
   try {
     const ref = execSync('git symbolic-ref refs/remotes/origin/HEAD', {
-      cwd: ROOT,
+      cwd: PROJECT_ROOT,
       encoding: 'utf8',
     }).trim()
     return ref.replace('refs/remotes/origin/', '')
   } catch {
     try {
       execSync('git rev-parse --verify origin/main', {
-        cwd: ROOT,
+        cwd: PROJECT_ROOT,
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'pipe'],
       })
@@ -478,11 +523,11 @@ function getDefaultBranch() {
   }
 }
 
-function ensureCleanMain() {
+function ensureCleanMain(): boolean {
   const branch = getDefaultBranch()
   try {
     const status = execSync('git status --porcelain', {
-      cwd: ROOT,
+      cwd: PROJECT_ROOT,
       encoding: 'utf8',
     }).trim()
     if (status) {
@@ -490,51 +535,51 @@ function ensureCleanMain() {
         'WARNING: Uncommitted changes detected. Stashing before switching branches.',
       )
       execSync('git stash --include-untracked', {
-        cwd: ROOT,
+        cwd: PROJECT_ROOT,
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'pipe'],
       })
     }
 
     execSync(`git checkout ${branch}`, {
-      cwd: ROOT,
+      cwd: PROJECT_ROOT,
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     execSync(`git pull origin ${branch}`, {
-      cwd: ROOT,
+      cwd: PROJECT_ROOT,
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
     })
 
     log(`Git: on ${branch}, up to date with remote.`)
     return true
-  } catch (err) {
+  } catch (err: any) {
     log(`ERROR: Failed to prepare git state: ${err.message}`)
     return false
   }
 }
 
-function ensureBranchExistsRemotely(branch, defaultBranch) {
+function ensureBranchExistsRemotely(branch: string, defaultBranch: string): boolean {
   if (branch === defaultBranch) return true
   try {
     execSync(`git ls-remote --exit-code --heads origin ${branch}`, {
-      cwd: ROOT,
+      cwd: PROJECT_ROOT,
       stdio: 'ignore',
     })
     // Also fetch it
-    execSync(`git fetch origin ${branch}`, { cwd: ROOT, stdio: 'ignore' })
+    execSync(`git fetch origin ${branch}`, { cwd: PROJECT_ROOT, stdio: 'ignore' })
     return true
   } catch {
     log(`Base branch ${branch} not found on remote. Creating it from ${defaultBranch}...`)
     try {
-      execSync(`git checkout ${defaultBranch}`, { cwd: ROOT, stdio: 'ignore' })
-      try { execSync(`git branch -D ${branch}`, { cwd: ROOT, stdio: 'ignore' }) } catch {}
-      execSync(`git checkout -b ${branch}`, { cwd: ROOT, stdio: 'ignore' })
-      execSync(`git push -u origin ${branch}`, { cwd: ROOT, stdio: 'ignore' })
+      execSync(`git checkout ${defaultBranch}`, { cwd: PROJECT_ROOT, stdio: 'ignore' })
+      try { execSync(`git branch -D ${branch}`, { cwd: PROJECT_ROOT, stdio: 'ignore' }) } catch {}
+      execSync(`git checkout -b ${branch}`, { cwd: PROJECT_ROOT, stdio: 'ignore' })
+      execSync(`git push -u origin ${branch}`, { cwd: PROJECT_ROOT, stdio: 'ignore' })
       log(`Created base branch: ${branch}`)
       return true
-    } catch (err) {
+    } catch (err: any) {
       log(`Failed to create base branch ${branch}: ${err.message}`)
       return false
     }
@@ -543,7 +588,7 @@ function ensureBranchExistsRemotely(branch, defaultBranch) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function slugify(str) {
+function slugify(str: string): string {
   return str
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
@@ -551,19 +596,19 @@ function slugify(str) {
     .slice(0, 50)
 }
 
-function branchName(agent, issue) {
+function branchName(agent: AgentConfig, issue: GitHubIssue): string {
   const prefix = agent.branchPrefix || 'claude-'
   return `${prefix}${issue.number}-${slugify(issue.title)}`
 }
 
-function findExistingPR(issueNumber) {
+function findExistingPR(issueNumber: number): GitHubPR | null {
   const repo = getRepoNameWithOwner()
   if (!repo) return null
 
   const events = gh(
     `api /repos/${repo}/issues/${issueNumber}/timeline --paginate`,
     true,
-  )
+  ) as any[] | null
   if (events && Array.isArray(events)) {
     for (const event of events) {
       if (
@@ -574,7 +619,7 @@ function findExistingPR(issueNumber) {
         const pr = gh(
           `pr view ${prNum} --json number,headRefName,url,title,state`,
           true,
-        )
+        ) as GitHubPR | null
         if (pr && pr.state === 'OPEN') return pr
       }
       if (event.event === 'connected' && event.source?.issue?.pull_request) {
@@ -582,7 +627,7 @@ function findExistingPR(issueNumber) {
         const pr = gh(
           `pr view ${prNum} --json number,headRefName,url,title,state`,
           true,
-        )
+        ) as GitHubPR | null
         if (pr && pr.state === 'OPEN') return pr
       }
     }
@@ -591,24 +636,24 @@ function findExistingPR(issueNumber) {
   const prs = gh(
     `pr list --search "[#${issueNumber}]" --state open --json number,headRefName,url,title,body`,
     true,
-  )
+  ) as any[] | null
   if (prs && Array.isArray(prs)) {
     const regex = new RegExp(`(?:fixes|closes|resolves)?\\s*#${issueNumber}\\b`, 'i')
     const found = prs.find((pr) => regex.test(pr.body) || regex.test(pr.title))
-    if (found) return found
+    if (found) return found as GitHubPR
   }
 
   return null
 }
 
-function getPRContext(prNumber) {
-  const reviews = gh(`pr view ${prNumber} --json reviews`, true)
+function getPRContext(prNumber: number): string {
+  const reviews = gh(`pr view ${prNumber} --json reviews`, true) as { reviews: any[] } | null
   const repo = getRepoNameWithOwner()
   const reviewComments = repo
-    ? gh(`api /repos/${repo}/pulls/${prNumber}/comments --paginate`, true)
+    ? gh(`api /repos/${repo}/pulls/${prNumber}/comments --paginate`, true) as any[] | null
     : null
-  const diff = gh(`pr diff ${prNumber}`, false) ?? ''
-  const prDetails = gh(`pr view ${prNumber} --json comments,body,files`, true)
+  const diff = (gh(`pr diff ${prNumber}`, false) as string) ?? ''
+  const prDetails = gh(`pr view ${prNumber} --json comments,body,files`, true) as { comments?: any[]; body?: string; files?: any[] } | null
 
   let context = ''
 
@@ -617,7 +662,7 @@ function getPRContext(prNumber) {
   }
 
   if (prDetails?.files && prDetails.files.length > 0) {
-    context += `### Changed Files\n${prDetails.files.map((f) => `- \`${f.path}\` (+${f.additions} -${f.deletions})`).join('\n')}\n\n`
+    context += `### Changed Files\n${prDetails.files.map((f: any) => `- \`${f.path}\` (+${f.additions} -${f.deletions})`).join('\n')}\n\n`
   }
 
   if (prDetails?.comments && prDetails.comments.length > 0) {
@@ -652,13 +697,15 @@ function getPRContext(prNumber) {
   return context
 }
 
-async function buildRevisionPrompt(issue, pr) {
+async function buildRevisionPrompt(issue: GitHubIssue, pr: GitHubPR): Promise<string> {
+  if (!CONFIG) return ''
   const ctx = { issue, pr }
   await callStep(CONFIG.hooks, 'preBuildRevisionPrompt', ctx)
 
-  if (ctx.prompt) {
-    await callStep(CONFIG.hooks, 'postBuildRevisionPrompt', ctx)
-    return ctx.prompt
+  const ctxAny = ctx as any
+  if (ctxAny.prompt) {
+    await callStep(CONFIG.hooks, 'postBuildRevisionPrompt', ctxAny)
+    return ctxAny.prompt
   }
 
   const branch = pr.headRefName
@@ -666,19 +713,19 @@ async function buildRevisionPrompt(issue, pr) {
   const full = gh(
     `issue view ${issue.number} --json body,labels,comments`,
     true,
-  )
+  ) as any
   const body = full?.body ?? issue.body ?? '(no description provided)'
 
-  const labelNames = (full?.labels ?? issue.labels ?? []).map((l) => l.name)
+  const labelNames = (full?.labels ?? issue.labels ?? []).map((l: any) => l.name)
   const labelSection =
     labelNames.length > 0
-      ? `### Labels\n${labelNames.map((n) => `- ${n}`).join('\n')}`
+      ? `### Labels\n${labelNames.map((n: string) => `- ${n}`).join('\n')}`
       : ''
 
   const issueComments = full?.comments ?? []
   const issueCommentSection =
     issueComments.length > 0
-      ? `### Issue Comments\n${issueComments.map((c, i) => `**Comment ${i + 1}** (by ${c.author?.login ?? 'unknown'}):\n${c.body}`).join('\n\n---\n\n')}`
+      ? `### Issue Comments\n${issueComments.map((c: any, i: number) => `**Comment ${i + 1}** (by ${c.author?.login ?? 'unknown'}):\n${c.body}`).join('\n\n---\n\n')}`
       : ''
 
   const prContext = getPRContext(pr.number)
@@ -727,7 +774,7 @@ Apply all requested changes. Project conventions:
 - **No eslint-disable comments** \u2014 fix the underlying lint error instead
 - Use src/lib/api-client.ts for all frontend data fetching
 - Dev server is assumed running on port 3000
-- Put temporary files in ./tmp/
+- Put temporary files in the skill's own tmp/ folder
 - Assume any CLI command can hang \u2014 set a max timeout when waiting for output
 
 ### 5. Verify
@@ -767,13 +814,14 @@ ${issueCommentSection}
 ${prContext}
 `.trim()
 
-  ctx.prompt = prompt
-  await callStep(CONFIG.hooks, 'postBuildRevisionPrompt', ctx)
-  return ctx.prompt
+  ctxAny.prompt = prompt
+  await callStep(CONFIG.hooks, 'postBuildRevisionPrompt', ctxAny)
+  return ctxAny.prompt
 }
 
-async function buildPrompt(agent, issue, branch, baseBranch, defaultBranch, step = 'coding', prd = null, skillOverride = null) {
-  const ctx = { issue, agent, branch, baseBranch, step }
+async function buildPrompt(agent: AgentConfig, issue: GitHubIssue, branch: string, baseBranch: string, defaultBranch: string, step: string = 'coding', prd: GitHubIssue | null = null, skillOverride: string | null = null): Promise<string> {
+  if (!CONFIG) return ''
+  const ctx = { issue, agent, branch, baseBranch, step } as any
   await callStep(CONFIG.hooks, 'preBuildPrompt', ctx)
 
   if (ctx.prompt) {
@@ -783,7 +831,7 @@ async function buildPrompt(agent, issue, branch, baseBranch, defaultBranch, step
 
   let workflow = ''
   if (agent.promptFile) {
-    const fpath = resolve(ROOT, agent.promptFile)
+    const fpath = resolve(PROJECT_ROOT, agent.promptFile)
     if (existsSync(fpath)) {
       workflow = readFileSync(fpath, 'utf8')
     } else {
@@ -802,9 +850,9 @@ async function buildPrompt(agent, issue, branch, baseBranch, defaultBranch, step
   let rootPrompt = skillOverride
   if (!rootPrompt) {
     if (step === 'review' && CONFIG.getReviewSkill) {
-      rootPrompt = typeof CONFIG.getReviewSkill === 'function' ? CONFIG.getReviewSkill(issue, prd, agent) : CONFIG.getReviewSkill
+      rootPrompt = typeof CONFIG.getReviewSkill === 'function' ? (CONFIG.getReviewSkill as any)(issue, prd, agent) : CONFIG.getReviewSkill
     } else if (step === 'coding' && CONFIG.getCodePrompt) {
-      rootPrompt = typeof CONFIG.getCodePrompt === 'function' ? CONFIG.getCodePrompt(issue, prd, agent) : CONFIG.getCodePrompt
+      rootPrompt = typeof CONFIG.getCodePrompt === 'function' ? (CONFIG.getCodePrompt as any)(issue, prd, agent) : CONFIG.getCodePrompt
     }
   }
 
@@ -832,17 +880,17 @@ Review these changes, check them against the requirements, and make fixes where 
     .replaceAll('{{ISSUE_URL}}', issue.url)
     .replaceAll('origin/master', `origin/${defaultBranch}`)
 
-  const full = gh(`issue view ${issue.number} --json body,labels,comments`, true)
+  const full = gh(`issue view ${issue.number} --json body,labels,comments`, true) as any
   const body = full?.body ?? issue.body ?? '(no description provided)'
 
-  const labelNames = (full?.labels ?? issue.labels ?? []).map((l) => l.name)
+  const labelNames = (full?.labels ?? issue.labels ?? []).map((l: any) => l.name)
   const labelSection =
-    labelNames.length > 0 ? `### Labels\n${labelNames.map((n) => `- ${n}`).join('\n')}` : ''
+    labelNames.length > 0 ? `### Labels\n${labelNames.map((n: string) => `- ${n}`).join('\n')}` : ''
 
   const comments = full?.comments ?? []
   const commentSection =
     comments.length > 0
-      ? `### Comments\n${comments.map((c, i) => `**Comment ${i + 1}** (by ${c.author?.login ?? 'unknown'}):\n${c.body}`).join('\n\n---\n\n')}`
+      ? `### Comments\n${comments.map((c: any, i: number) => `**Comment ${i + 1}** (by ${c.author?.login ?? 'unknown'}):\n${c.body}`).join('\n\n---\n\n')}`
       : ''
 
   ctx.prompt = `${instructions}
@@ -863,11 +911,11 @@ ${commentSection}
 }
 
 // Track the active child so we can kill it on exit
-let activeChild = null
+let activeChild: ChildProcess | null = null
 
 // ── Sleep prevention (Windows only) ──────────────────────────────────────────
 
-let sleepPreventionProcess = null
+let sleepPreventionProcess: ChildProcess | null = null
 
 function enableSleepPrevention() {
   if (process.platform !== 'win32') return
@@ -886,7 +934,6 @@ while ($true) { Start-Sleep 60; [SleepPreventer]::SetThreadExecutionState(0x8000
     ['-NoProfile', '-NonInteractive', '-Command', ps],
     {
       stdio: 'ignore',
-      detached: false,
     },
   )
   log('Sleep prevention enabled.')
@@ -899,8 +946,9 @@ function disableSleepPrevention() {
   log('Sleep prevention disabled.')
 }
 
-async function spawnAgent(agent, issue, prompt) {
-  const ctx = { agent, issue, prompt }
+async function spawnAgent(agent: AgentConfig, issue: GitHubIssue, prompt: string): Promise<string> {
+  if (!CONFIG) throw new Error('Daemon not initialized')
+  const ctx = { agent, issue, prompt } as any
   await callStep(CONFIG.hooks, 'preSpawnAgent', ctx)
 
   return new Promise((resolve, reject) => {
@@ -909,40 +957,40 @@ async function spawnAgent(agent, issue, prompt) {
     log(`Spawning ${ctx.agent.command} ${args.join(' ')} (model: ${model}) ...`)
 
     const child = spawn(ctx.agent.command, args, {
-      cwd: ROOT,
+      cwd: PROJECT_ROOT,
       env: { ...process.env, ANTHROPIC_API_KEY: undefined },
       stdio: ['pipe', 'pipe', 'pipe'],
     })
 
-    child.stdin.write(ctx.prompt, 'utf8')
-    child.stdin.end()
+    child.stdin!.write(ctx.prompt, 'utf8')
+    child.stdin!.end()
 
     activeChild = child
     let stdout = ''
     let stderr = ''
-    child.stdout.on('data', (d) => {
+    child.stdout!.on('data', (d) => {
       process.stdout.write(d)
       stdout += d
       try {
-        writeFileSync(CONFIG.logFile, d, { flag: 'a' })
+        writeFileSync(CONFIG!.logFile, d, { flag: 'a' })
       } catch {}
     })
-    child.stderr.on('data', (d) => {
+    child.stderr!.on('data', (d) => {
       process.stderr.write(d)
       stderr += d
       try {
-        writeFileSync(CONFIG.logFile, d, { flag: 'a' })
+        writeFileSync(CONFIG!.logFile, d, { flag: 'a' })
       } catch {}
     })
     child.on('close', async (code) => {
       activeChild = null
       if (code === 0) {
         ctx.output = stdout
-        await callStep(CONFIG.hooks, 'postSpawnAgent', ctx)
+        await callStep(CONFIG!.hooks, 'postSpawnAgent', ctx)
         resolve(ctx.output)
       } else {
         const tail = stderr.trim().split('\n').slice(-10).join('\n')
-        const err = new Error(`${agent.command} exited ${code}`)
+        const err = new Error(`${agent.command} exited ${code}`) as any
         err.stderr = tail
         reject(err)
       }
@@ -950,8 +998,8 @@ async function spawnAgent(agent, issue, prompt) {
   })
 }
 
-function readPrMeta() {
-  const metaPath = resolve(ROOT, 'tmp/pr-meta.json')
+function readPrMeta(): any {
+  const metaPath = resolve(SKILL_TMP_DIR, 'pr-meta.json')
   try {
     if (!existsSync(metaPath)) return null
     return JSON.parse(readFileSync(metaPath, 'utf8'))
@@ -961,7 +1009,7 @@ function readPrMeta() {
 }
 
 function cleanPrMeta() {
-  const metaPath = resolve(ROOT, 'tmp/pr-meta.json')
+  const metaPath = resolve(SKILL_TMP_DIR, 'pr-meta.json')
   try {
     if (existsSync(metaPath)) unlinkSync(metaPath)
   } catch {}
@@ -970,12 +1018,13 @@ function cleanPrMeta() {
 // ── Label validation ──────────────────────────────────────────────────────────
 
 async function validateLabels() {
+  if (!CONFIG) return
   const repo = getRepoNameWithOwner()
   if (!repo) {
     log('WARNING: Could not determine repo. Skipping label validation.')
     return
   }
-  const allLabels = new Set()
+  const allLabels = new Set<string>()
   for (const agent of Object.values(CONFIG.agents)) {
     for (const label of Object.values(agent.labels)) {
       allLabels.add(label)
@@ -987,7 +1036,7 @@ async function validateLabels() {
   }
 
   for (const label of allLabels) {
-    const existing = gh(`label list --search "${label}" --json name`, true)
+    const existing = gh(`label list --search "${label}" --json name`, true) as any[] | null
     const found = existing?.some((l) => l.name === label)
     if (!found) {
       log(`Creating missing label: "${label}"`)
@@ -1002,6 +1051,7 @@ async function validateLabels() {
 let currentTick = 0
 
 async function tick() {
+  if (!CONFIG) return
   const tickCtx = { tick: currentTick++, startedAt: new Date() }
   await callStep(CONFIG.hooks, 'preLoop', tickCtx)
 
@@ -1024,7 +1074,7 @@ async function tick() {
     return
   }
 
-  const pickCtx = { issues, picked: CONFIG.pickIssue(issues) }
+  const pickCtx = { issues, picked: CONFIG.pickIssue!(issues) }
   await callStep(CONFIG.hooks, 'prePickIssue', pickCtx)
   // pickIssue hook can override the choice
   const issue = pickCtx.picked
@@ -1040,7 +1090,7 @@ async function tick() {
   const prdInfo = getPrdInfo(issue, gh)
 
   // 4. Select Agent(s)
-  const agentSelection = await CONFIG.getAgent(issue, CONFIG.agents, { step: 'coding', prdInfo })
+  const agentSelection = await CONFIG.getAgent!(issue, CONFIG.agents, { step: 'coding', prdInfo })
   const agents = Array.isArray(agentSelection) ? agentSelection : [agentSelection]
   if (agents.length === 0 || !agents[0]) {
     log('getAgent returned no agent — skipping issue.')
@@ -1069,19 +1119,19 @@ async function tick() {
 
     const existingPR = findExistingPR(issue.number)
     const isRevision = !!existingPR
-    const branch = isRevision ? existingPR.headRefName : branchName(agent, issue)
+    const branch = isRevision ? existingPR!.headRefName : branchName(agent, issue)
 
     const defaultBranch = getDefaultBranch()
     let baseBranch = defaultBranch
 
     if (!isRevision) {
-      const gbbCtx = { issue, defaultBranch }
+      const gbbCtx = { issue, defaultBranch } as any
       await callStep(CONFIG.hooks, 'preGetBaseBranch', gbbCtx)
 
       try {
-        baseBranch = gbbCtx.baseBranch || await agent.getBaseBranch(issue, gh, defaultBranch)
+        baseBranch = gbbCtx.baseBranch || await agent.getBaseBranch!(issue, gh, defaultBranch)
         if (!baseBranch) baseBranch = defaultBranch
-      } catch (err) {
+      } catch (err: any) {
         log(`WARNING: getBaseBranch failed: ${err.message}. Using default.`)
       }
 
@@ -1091,24 +1141,24 @@ async function tick() {
 
       if (!ensureBranchExistsRemotely(baseBranch, defaultBranch)) {
         log(`ERROR: Base branch ${baseBranch} could not be ensured.`)
-        await swapLabels(issue.number, agent.labels.inProgress, agent.labels.fixme)
+        await swapLabels(issue.number, agent.labels.inProgress, agent.labels.fixme!)
         await addComment(issue.number, `🤖 **Cannot start** \u2014 failed to setup base branch \`${baseBranch}\`. Marked as fixme.`)
         return
       }
     }
 
     if (isRevision) {
-      log(`Found existing PR #${existingPR.number} on branch ${branch} \u2014 entering revision mode`)
+      log(`Found existing PR #${existingPR!.number} on branch ${branch} \u2014 entering revision mode`)
     }
 
     // 5c. Prepare Prompt
     const prompt = isRevision
-      ? await buildRevisionPrompt(issue, existingPR)
+      ? await buildRevisionPrompt(issue, existingPR!)
       : await buildPrompt(agent, issue, branch, baseBranch, defaultBranch, 'coding', prdInfo)
 
     // 5d. Run Agent
     cleanPrMeta()
-    const taskCtx = { issue, agent, branch, baseBranch }
+    const taskCtx = { issue, agent, branch, baseBranch } as any
     await callStep(CONFIG.hooks, 'preStartTask', taskCtx)
 
     try {
@@ -1120,21 +1170,21 @@ async function tick() {
 
       if (taskCtx.output.includes('CLARIFICATION_REQUESTED')) {
         log('Clarification needed \u2014 swapping to question.')
-        await swapLabels(issue.number, [labels.inProgress, labels.ready], labels.question)
+        await swapLabels(issue.number, [labels.inProgress, labels.ready], labels.question!)
       } else {
         let reviewSkipped = true;
 
         // Auto-commit any leftover files and push BEFORE handling PR
         try {
-          const status = execSync('git status --porcelain', { cwd: ROOT, encoding: 'utf8' }).trim()
+          const status = execSync('git status --porcelain', { cwd: PROJECT_ROOT, encoding: 'utf8' }).trim()
           if (status) {
-            const commitCtx = { issueNumber: issue.number, branch, message: `Auto-commit remaining changes for #${issue.number}` }
+            const commitCtx = { issueNumber: issue.number, branch, message: `Auto-commit remaining changes for #${issue.number}` } as any
             await callStep(CONFIG.hooks, 'preAutoCommit', commitCtx)
 
             if (commitCtx.message) {
               log('WARNING: Uncommitted changes detected. Auto-committing them.')
-              execSync('git add -A', { cwd: ROOT })
-              execSync(`git commit -m "${commitCtx.message}"`, { cwd: ROOT })
+              execSync('git add -A', { cwd: PROJECT_ROOT })
+              execSync(`git commit -m "${commitCtx.message}"`, { cwd: PROJECT_ROOT })
               await addComment(issue.number, `🤖 **Note:** Auto-committed some leftover uncommitted files to \`${commitCtx.branch}\` before pushing.`)
               commitCtx.committed = true
             }
@@ -1145,14 +1195,14 @@ async function tick() {
              log('Review step is configured and enabled. Starting review phase.')
              await addComment(issue.number, `🤖 **Starting code review.**`)
 
-             const reviewAgentSelection = await CONFIG.getAgent(issue, CONFIG.agents, { step: 'review', prdInfo })
+             const reviewAgentSelection = await CONFIG.getAgent!(issue, CONFIG.agents, { step: 'review', prdInfo })
              const reviewAgents = Array.isArray(reviewAgentSelection) ? reviewAgentSelection : [reviewAgentSelection]
              
-             const reviewSkillCtx = { issue, prd: prdInfo, agent: reviewAgents[0] }
+             const reviewSkillCtx = { issue, prd: prdInfo, agent: reviewAgents[0] } as any
              await callStep(CONFIG.hooks, 'preGetReviewSkill', reviewSkillCtx)
              if (!reviewSkillCtx.skill && CONFIG.getReviewSkill) {
                reviewSkillCtx.skill = typeof CONFIG.getReviewSkill === 'function' 
-                 ? CONFIG.getReviewSkill(issue, prdInfo, reviewAgents[0]) 
+                 ? (CONFIG.getReviewSkill as any)(issue, prdInfo, reviewAgents[0]) 
                  : CONFIG.getReviewSkill
              }
              await callStep(CONFIG.hooks, 'postGetReviewSkill', reviewSkillCtx)
@@ -1167,7 +1217,7 @@ async function tick() {
                
                const reviewPrompt = await buildPrompt(revAgent, issue, branch, baseBranch, defaultBranch, 'review', prdInfo, reviewSkillCtx.skill)
                
-               const startReviewCtx = { issue, agent: revAgent, branch, baseBranch }
+               const startReviewCtx = { issue, agent: revAgent, branch, baseBranch } as any
                await callStep(CONFIG.hooks, 'preStartReview', startReviewCtx)
 
                try {
@@ -1182,16 +1232,16 @@ async function tick() {
                  }
                  reviewSuccess = true
                  break
-               } catch (err) {
+               } catch (err: any) {
                  log(`ERROR during review run: ${err.message}`)
                }
              }
 
              if (reviewSuccess) {
-               const reviewStatus = execSync('git status --porcelain', { cwd: ROOT, encoding: 'utf8' }).trim()
+               const reviewStatus = execSync('git status --porcelain', { cwd: PROJECT_ROOT, encoding: 'utf8' }).trim()
                if (reviewStatus) {
-                 execSync('git add -A', { cwd: ROOT })
-                 execSync(`git commit -m "Review fixes for #${issue.number}"`, { cwd: ROOT })
+                 execSync('git add -A', { cwd: PROJECT_ROOT })
+                 execSync(`git commit -m "Review fixes for #${issue.number}"`, { cwd: PROJECT_ROOT })
                  log('Committed review fixes.')
                  await addComment(issue.number, `🤖 **Note:** Review step made changes and created a new commit.`)
                } else {
@@ -1205,8 +1255,8 @@ async function tick() {
           }
 
           log(`Ensuring push for branch ${branch}...`)
-          execSync(`git push origin ${branch}`, { cwd: ROOT, stdio: 'ignore' })
-        } catch (e) {
+          execSync(`git push origin ${branch}`, { cwd: PROJECT_ROOT, stdio: 'ignore' })
+        } catch (e: any) {
           log(`WARNING: auto-commit/push/review failed: ${e.message}`)
         }
 
@@ -1216,7 +1266,7 @@ async function tick() {
           let prCreated = false
 
           if (!meta) {
-            log('WARNING: tmp/pr-meta.json not found. Falling back to default metadata.')
+            log('WARNING: pr-meta.json not found in skill tmp. Falling back to default metadata.')
             await addComment(issue.number, '🤖 Implementation complete but PR metadata file not found. Generating default PR details.\nBranch: `' + branch + '`')
             meta = {
               title: `Fixes #${issue.number}: ${issue.title} [#${issue.number}]`,
@@ -1224,13 +1274,13 @@ async function tick() {
             }
           }
 
-          const bodyPath = resolve(ROOT, 'tmp/pr-body.md')
+          const bodyPath = resolve(SKILL_TMP_DIR, 'pr-body.md')
           let body = meta.body ?? ''
           if (body && !body.includes(`#${issue.number}`)) {
             body += `\n\nFixes #${issue.number}`
           }
 
-          const prCtx = { issue, branch, baseBranch, title: meta.title, body }
+          const prCtx = { issue, branch, baseBranch, title: meta.title, body } as any
           await callStep(CONFIG.hooks, 'preCreatePullRequest', prCtx)
 
           writeFileSync(bodyPath, prCtx.body, 'utf8')
@@ -1255,32 +1305,32 @@ async function tick() {
           if (prCreated) {
             // We explicitly remove 'ready' again here just in case the start-time removal failed or race condition occurred.
             const labelsToAdd = [labels.inReview];
-            if (reviewSkipped) labelsToAdd.push(labels.reviewSkipped);
+            if (reviewSkipped) labelsToAdd.push(labels.reviewSkipped!);
             await swapLabels(issue.number, [labels.inProgress, labels.ready], labelsToAdd)
           } else {
-            await swapLabels(issue.number, [labels.inProgress, labels.ready], labels.fixme)
+            await swapLabels(issue.number, [labels.inProgress, labels.ready], labels.fixme!)
           }
         } else {
           // Update PR
           const labelsToAdd = [labels.inReview];
-          if (reviewSkipped) labelsToAdd.push(labels.reviewSkipped);
+          if (reviewSkipped) labelsToAdd.push(labels.reviewSkipped!);
           
-          await addComment(issue.number, `🤖 **PR updated with review fixes:** ${existingPR.url}`)
+          await addComment(issue.number, `🤖 **PR updated with review fixes:** ${existingPR!.url}`)
           await swapLabels(issue.number, [labels.inProgress, labels.ready], labelsToAdd)
         }
       }
 
       success = true
       break
-    } catch (err) {
+    } catch (err: any) {
       log(`ERROR during ${agent.command} run: ${err.message}`)
       if (i < agents.length - 1) {
         log(`Attempt ${i + 1} failed. Powering through to next agent...`)
-        try { execSync('git reset --hard && git clean -fd', { cwd: ROOT }) } catch {}
+        try { execSync('git reset --hard && git clean -fd', { cwd: PROJECT_ROOT }) } catch {}
         continue
       }
       // Ultimate failure
-      await swapLabels(issue.number, [labels.inProgress, labels.ready], labels.fixme)
+      await swapLabels(issue.number, [labels.inProgress, labels.ready], labels.fixme!)
       const details = err.stderr ? `\n\n\`\`\`\n${err.stderr}\n\`\`\`` : ''
       await addComment(issue.number, `🤖 **All agents failed** \u2014 marked as fixme.\n\nError from last attempt (${agent.command}): ${err.message}${details}`)
     }
@@ -1295,10 +1345,11 @@ async function tick() {
 // ── Log tail display ──────────────────────────────────────────────────────────
 
 const LOG_TAIL_LINES = 5
-let logTailInterval = null
+let logTailInterval: NodeJS.Timeout | null = null
 let logTailRenderedCount = 0 // how many lines are currently occupying the terminal
 
-function getLastLogLines() {
+function getLastLogLines(): string[] {
+  if (!CONFIG) return Array(LOG_TAIL_LINES).fill('')
   try {
     const content = existsSync(CONFIG.logFile) ? readFileSync(CONFIG.logFile, 'utf8') : ''
     const all = content.split('\n').filter(Boolean)
@@ -1348,12 +1399,13 @@ function stopLogTail() {
 // ── Start ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  CONFIG = await loadConfig()
+  CONFIG = await loadConfig() as any
+  if (!CONFIG) return
   enableSleepPrevention()
   log('\u2501\u2501\u2501 GitHub daemon started \u2501\u2501\u2501')
   log(`Poll: every ${CONFIG.pollIntervalMs / 1000}s`)
-  log(`Agents: ${Object.values(CONFIG.agents).map((a) => a.command).join(', ')}`)
-  log(`Repo: ${ROOT}`)
+  log(`Agents: ${Object.values(CONFIG.agents).map((a: any) => a.command).join(', ')}`)
+  log(`Repo: ${PROJECT_ROOT}`)
   log(`Logs: ${CONFIG.logFile}`)
   log('Press Ctrl-C to stop.')
 
@@ -1364,7 +1416,7 @@ async function main() {
         logFile: CONFIG.logFile,
         agents: Object.keys(CONFIG.agents),
       })
-    } catch (err) {
+    } catch (err: any) {
       log(`Warning: onStart failed: ${err.message}`)
     }
   }
@@ -1382,7 +1434,7 @@ async function main() {
   setInterval(runTick, CONFIG.pollIntervalMs)
 }
 
-async function shutdown(signal) {
+async function shutdown(signal: string) {
   stopLogTail()
   log(`${signal} received \u2014 shutting down.`)
   if (activeChild) {
@@ -1392,7 +1444,7 @@ async function shutdown(signal) {
   if (CONFIG?.userConfig?.onStop) {
     try {
       await CONFIG.userConfig.onStop({ signal })
-    } catch (err) {
+    } catch (err: any) {
       log(`Warning: onStop failed: ${err.message}`)
     }
   }
@@ -1404,3 +1456,4 @@ process.on('SIGTERM', () => shutdown('SIGTERM'))
 process.on('SIGINT', () => shutdown('SIGINT'))
 
 main()
+

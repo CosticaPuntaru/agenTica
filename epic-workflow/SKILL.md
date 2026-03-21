@@ -19,7 +19,7 @@ This skill guides the agent through an end-to-end process for planning large fea
 
 Long-running workflows like Epics can exceed the model's context window. To maintain efficiency and accuracy:
 
-1. **Phase Checkpointing**: After EVERY phase, summarize the findings into a dedicated Epic directory: `.agents/epics/<epic-name>/context/`. 
+1. **Phase Checkpointing**: After EVERY phase, summarize the findings into the skill's own tmp directory: `epic-workflow/tmp/epics/<epic-name>/context/`. 
    - After `/grill-me`: Save to `grill-summary.md`.
    - After research: Save to `research-notes.md`.
 2. **"Stateless" Resumption**: If the session gets too long, instruct the user that you are "checkpointing". Next time you start, simply `view_file` on these summaries instead of re-processing the entire chat history.
@@ -38,12 +38,12 @@ Long-running workflows like Epics can exceed the model's context window. To main
    - **Command**: `/grill-me`
    - **Goal**: Resolving all conceptual ambiguity and design tree branches before drafting.
 4. **Checkpoint Findings**
-   - **Action**: Save all resolved branches and user decisions to `.agents/epics/<name>/context/grill-summary.md`.
+   - **Action**: Save all resolved branches and user decisions to `epic-workflow/tmp/epics/<name>/context/grill-summary.md`.
 
 ### Phase 2: Domain Alignment
 5.  **Establish Ubiquitous Language**
     - **Skill**: `ubiquitous-language`.
-    - **Goal**: Define canonical terms in `UBIQUITOUS_LANGUAGE.md`.
+    - **Goal**: Define canonical terms in `epic-workflow/tmp/UBIQUITOUS_LANGUAGE.md`.
 
 ### Phase 3: Formalizing the PRD
 6.  **Draft the PRD**
@@ -60,7 +60,7 @@ Long-running workflows like Epics can exceed the model's context window. To main
 ### Phase 5: GitHub Issue Creation (Synchronous)
 9.  **Create the Parent Epic (PRD Issue)**
     - **Pre-flight Check**: Ensure the user has approved the final PRD from Phase 3.
-    - **Tool**: `gh issue create --title "PRD: <epic-title>" --body "$(cat prd.md)" --label "prd,enhancement"`.
+    - **Tool**: `gh issue create --title "PRD: <epic-title>" --body "$(cat epic-workflow/tmp/prd.md)" --label "prd,enhancement"`.
     - **BLOCKING ACTION**: You MUST capture the resulting **Issue Number** (e.g., `#123`). This number is required for everything below.
 
 10. **Create the Epic Feature Branch**
@@ -84,7 +84,7 @@ Long-running workflows like Epics can exceed the model's context window. To main
       - **ASK the user**: "Should I label these tasks as 'ready' (e.g., `${READY_LABEL}`) for the autonomous daemon to pick them up immediately?"
       - Only add the `ready` label if the user confirms.
       ```bash
-      gh issue create --title "Task: ..." --body "$(cat task-N.md)" --label "task,${READY_LABEL}"
+      gh issue create --title "Task: ..." --body "$(cat epic-workflow/tmp/task-N.md)" --label "task,${READY_LABEL}"
       ```
     - **Create tasks in dependency order** (blockers first), capturing each issue number before creating dependent tasks.
 12. **Update the Parent PRD with the Task Roadmap**

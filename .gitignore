@@ -1,2 +1,4 @@
 node_modules
-.agents/triage
+.agents/
+.agent/
+.claude/
