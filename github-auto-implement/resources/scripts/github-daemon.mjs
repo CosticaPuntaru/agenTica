@@ -47,6 +47,7 @@ async function loadConfig() {
       inReview: 'autobot:in-review',
       question: 'autobot:question',
       fixme: 'autobot:fixme',
+      reviewSkipped: 'autobot:reviewSkipped',
     },
     QUERY: (labels) =>
       `is:issue is:open label:"${labels.ready}" -label:"${labels.question}" -label:"${labels.inProgress}"`,
@@ -68,6 +69,19 @@ async function loadConfig() {
     },
     GET_BASE_BRANCH: (issue, gh, defaultBranch) => {
       const body = issue.body ?? ''
+      
+      // Determine if there is a Parent PRD to fall back to instead of defaultBranch
+      let fallbackBranch = defaultBranch
+      const epicRegex = /Parent PRD:\s+(?:#|https:\/\/github\.com\/\S+\/issues\/)(\d+)/gi
+      const epicMatch = epicRegex.exec(body)
+      if (epicMatch) {
+        const epicNum = epicMatch[1]
+        const epicInfo = gh(`issue view ${epicNum} --json title,state`, true)
+        if (epicInfo && epicInfo.title) {
+          fallbackBranch = `epic/${epicNum}-${slugify(epicInfo.title)}`
+        }
+      }
+
       const blockerRegex = /Blocked by\s+(?:#|https:\/\/github\.com\/\S+\/issues\/)(\d+)/gi
       let match
       while ((match = blockerRegex.exec(body)) !== null) {
@@ -77,12 +91,19 @@ async function loadConfig() {
           true,
         )
         if (prs && prs.length > 0) {
+          const exactFound = prs.find((pr) => pr.title.includes(`[#${blockerNum}]`))
+          if (exactFound) return exactFound.headRefName
+          
           const regex = new RegExp(`(?:fixes|closes|resolves)?\\s*#${blockerNum}\\b`, 'i')
           const found = prs.find((pr) => regex.test(pr.body) || regex.test(pr.title))
           if (found) return found.headRefName
+
+          // If GitHub search returned a PR but it didn't strictly match the regex above,
+          // trust the search result to prevent falling back to the default branch (main).
+          return prs[0].headRefName
         }
       }
-      return defaultBranch
+      return fallbackBranch
     },
     BRANCH_PREFIX: 'autobot/',
     GET_SKILL: (agent, _issue) => {
@@ -153,11 +174,13 @@ async function loadConfig() {
     agents: resolvedAgents,
     GET_AGENT:
       userConfig.GET_AGENT ||
-      ((issue, agents) => {
+      ((issue, agents, context = { step: 'coding' }) => {
         // Default: use the first one available
         const firstId = Object.keys(agents)[0]
         return agents[firstId]
       }),
+    GET_CODE_PROMPT: userConfig.GET_CODE_PROMPT || (() => ''),
+    GET_REVIEW_PROMPT: userConfig.GET_REVIEW_PROMPT || null,
     PICKER: userConfig.PICKER || agentDefaults.PICKER,
     QUERY: userConfig.QUERY || agentDefaults.QUERY,
     IS_BLOCKED: userConfig.IS_BLOCKED || agentDefaults.IS_BLOCKED,
@@ -335,6 +358,18 @@ async function addComment(issueNum, body) {
 }
 
 // ── Git preparation ──────────────────────────────────────────────────────────
+
+function getPrdInfo(issue, gh) {
+  const body = issue.body ?? ''
+  const epicRegex = /Parent PRD:\s+(?:#|https:\/\/github\.com\/\S+\/issues\/)(\d+)/gi
+  const epicMatch = epicRegex.exec(body)
+  if (epicMatch) {
+    const epicNum = epicMatch[1]
+    const epicInfo = gh(`issue view ${epicNum} --json title,body,state`, true)
+    return epicInfo
+  }
+  return null
+}
 
 function getDefaultBranch() {
   try {
@@ -639,7 +674,7 @@ ${prContext}
 `.trim()
 }
 
-function buildPrompt(agent, issue, branch, baseBranch, defaultBranch) {
+function buildPrompt(agent, issue, branch, baseBranch, defaultBranch, step = 'coding', prd = null) {
   let workflow = ''
   if (agent.promptFile) {
     const fpath = resolve(ROOT, agent.promptFile)
@@ -650,15 +685,38 @@ function buildPrompt(agent, issue, branch, baseBranch, defaultBranch) {
     }
   }
 
-  if (!workflow) {
+  if (!workflow && agent.GET_SKILL) {
     workflow = agent.GET_SKILL(agent, issue) ?? ''
   }
 
   const persona = agent.prompt ? `## Persona\n${agent.prompt}\n\n` : ''
   const skill = workflow.replace(/^---[\s\S]*?---\n/, '')
-  const combined = `${persona}${skill}`
+  const modelPrompt = `${persona}${skill}`
 
-  const instructions = combined
+  let rootPrompt = ''
+  if (step === 'review' && CONFIG.GET_REVIEW_PROMPT) {
+    rootPrompt = typeof CONFIG.GET_REVIEW_PROMPT === 'function' ? CONFIG.GET_REVIEW_PROMPT(issue, prd, agent) : CONFIG.GET_REVIEW_PROMPT
+  } else if (step === 'coding' && CONFIG.GET_CODE_PROMPT) {
+    rootPrompt = typeof CONFIG.GET_CODE_PROMPT === 'function' ? CONFIG.GET_CODE_PROMPT(issue, prd, agent) : CONFIG.GET_CODE_PROMPT
+  }
+
+  const combined = rootPrompt ? `${rootPrompt}\n\n${modelPrompt}` : modelPrompt
+
+  let stepInstructions = ''
+  if (step === 'review') {
+    stepInstructions = `
+### Review Process Context
+You are currently on branch \`${branch}\`.
+To review the actual changes made so far, you can use:
+\`\`\`bash
+git fetch origin ${baseBranch}
+git diff origin/${baseBranch}...${branch}
+\`\`\`
+Review these changes, check them against the requirements, and make fixes where necessary.
+`
+  }
+
+  const instructions = (combined + '\n' + stepInstructions)
     .replaceAll('{{BRANCH_NAME}}', branch)
     .replaceAll('{{BASE_BRANCH}}', baseBranch)
     .replaceAll('{{ISSUE_ID}}', String(issue.number))
@@ -679,11 +737,16 @@ function buildPrompt(agent, issue, branch, baseBranch, defaultBranch) {
       ? `### Comments\n${comments.map((c, i) => `**Comment ${i + 1}** (by ${c.author?.login ?? 'unknown'}):\n${c.body}`).join('\n\n---\n\n')}`
       : ''
 
+  let prdSection = ''
+  if (prd && prd.body) {
+    prdSection = `## Parent PRD\n\n### ${prd.title}\n\n${prd.body}\n\n---\n\n`
+  }
+
   return `${instructions}
 
 ---
 
-## Issue to implement: #${issue.number} \u2014 ${issue.title}
+${prdSection}## Issue to implement: #${issue.number} \u2014 ${issue.title}
 
 ${body}
 
@@ -850,8 +913,10 @@ async function tick() {
   }
   log(`Picked: #${issue.number} — ${issue.title}`)
 
+  const prdInfo = getPrdInfo(issue, gh)
+
   // 4. Select Agent(s)
-  const agentSelection = await CONFIG.GET_AGENT(issue, CONFIG.agents)
+  const agentSelection = await CONFIG.GET_AGENT(issue, CONFIG.agents, { step: 'coding', prdInfo })
   const agents = Array.isArray(agentSelection) ? agentSelection : [agentSelection]
   if (agents.length === 0 || !agents[0]) {
     log('GET_AGENT returned no agent — skipping issue.')
@@ -907,7 +972,7 @@ async function tick() {
     // 5c. Prepare Prompt
     const prompt = isRevision
       ? buildRevisionPrompt(issue, existingPR)
-      : buildPrompt(agent, issue, branch, baseBranch, defaultBranch)
+      : buildPrompt(agent, issue, branch, baseBranch, defaultBranch, 'coding', prdInfo)
 
     // 5d. Run Agent
     cleanPrMeta()
@@ -918,24 +983,85 @@ async function tick() {
       if (output.includes('CLARIFICATION_REQUESTED')) {
         log('Clarification needed \u2014 swapping to question.')
         await swapLabels(issue.number, [labels.inProgress, labels.ready], labels.question)
-      } else if (!isRevision) {
-        // Create PR
-        const meta = readPrMeta()
-        if (!meta) {
-          log('WARNING: tmp/pr-meta.json not found.')
-          await addComment(issue.number, '🤖 Implementation complete but PR metadata file not found.\nBranch: `' + branch + '`')
-        } else {
-          // Verify everything is committed and pushed
-          try {
-            const status = execSync('git status --porcelain', { cwd: ROOT, encoding: 'utf8' }).trim()
-            if (status) {
-              log('WARNING: Uncommitted changes detected after implementation.')
-              await addComment(issue.number, `🤖 **Implementation finished with uncommitted changes.** The agent might have missed some files. Branch: \`${branch}\``)
+      } else {
+        let reviewSkipped = true;
+
+        // Auto-commit any leftover files and push BEFORE handling PR
+        try {
+          const status = execSync('git status --porcelain', { cwd: ROOT, encoding: 'utf8' }).trim()
+          if (status) {
+            log('WARNING: Uncommitted changes detected. Auto-committing them.')
+            execSync('git add -A', { cwd: ROOT })
+            execSync(`git commit -m "Auto-commit remaining changes for #${issue.number}"`, { cwd: ROOT })
+            await addComment(issue.number, `🤖 **Note:** Auto-committed some leftover uncommitted files to \`${branch}\` before pushing.`)
+          }
+
+          if (!isRevision && CONFIG.GET_REVIEW_PROMPT) {
+             log('Review step is configured. Starting review phase.')
+             await addComment(issue.number, `🤖 **Starting code review.**`)
+             
+             const reviewAgentSelection = await CONFIG.GET_AGENT(issue, CONFIG.agents, { step: 'review', prdInfo })
+             const reviewAgents = Array.isArray(reviewAgentSelection) ? reviewAgentSelection : [reviewAgentSelection]
+             
+             let reviewSuccess = false
+             reviewSkipped = false;
+             for (let j = 0; j < reviewAgents.length; j++) {
+               const revAgent = reviewAgents[j];
+               if (!revAgent) continue;
+               
+               log(`Running review agent ${j + 1}/${reviewAgents.length}: ${revAgent.name || revAgent.COMMAND}...`)
+               const reviewPrompt = buildPrompt(revAgent, issue, branch, baseBranch, defaultBranch, 'review', prdInfo)
+               
+               try {
+                 const revOutput = await spawnAgent(revAgent, issue, reviewPrompt)
+                 log(`${revAgent.COMMAND} review completed successfully.`)
+                 if (revOutput.includes('CLARIFICATION_REQUESTED')) {
+                    log('Review step requested clarification.');
+                    await addComment(issue.number, `🤖 **Note:** Code review requested clarification. Continuing with push anyway.`);
+                 }
+                 reviewSuccess = true
+                 break
+               } catch (err) {
+                 log(`ERROR during review run: ${err.message}`)
+               }
+             }
+
+             if (reviewSuccess) {
+               const reviewStatus = execSync('git status --porcelain', { cwd: ROOT, encoding: 'utf8' }).trim()
+               if (reviewStatus) {
+                 execSync('git add -A', { cwd: ROOT })
+                 execSync(`git commit -m "Review fixes for #${issue.number}"`, { cwd: ROOT })
+                 log('Committed review fixes.')
+                 await addComment(issue.number, `🤖 **Note:** Review step made changes and created a new commit.`)
+               } else {
+                 log('Review resulted in no changes.')
+               }
+             } else {
+               log('WARNING: All review agents failed.')
+               await addComment(issue.number, `🤖 **Note:** Code review step failed. Pushing code anyway.`)
+               reviewSkipped = true;
+             }
+          }
+
+          log(`Ensuring push for branch ${branch}...`)
+          execSync(`git push origin ${branch}`, { cwd: ROOT, stdio: 'ignore' })
+        } catch (e) {
+          log(`WARNING: auto-commit/push/review failed: ${e.message}`)
+        }
+
+        if (!isRevision) {
+          // Create PR
+          let meta = readPrMeta()
+          let prCreated = false
+
+          if (!meta) {
+            log('WARNING: tmp/pr-meta.json not found. Falling back to default metadata.')
+            await addComment(issue.number, '🤖 Implementation complete but PR metadata file not found. Generating default PR details.\nBranch: `' + branch + '`')
+            meta = {
+              title: `Fixes #${issue.number}: ${issue.title} [#${issue.number}]`,
+              body: `Fixes #${issue.number}\n\nAutomated PR generated by \`${agent.COMMAND}\`.`
             }
-            // Ensure branch is pushed even if the agent forgot
-            log(`Ensuring push for branch ${branch}...`)
-            execSync(`git push origin ${branch}`, { cwd: ROOT, stdio: 'ignore' })
-          } catch {}
+          }
 
           const bodyPath = resolve(ROOT, 'tmp/pr-body.md')
           let body = meta.body ?? ''
@@ -953,15 +1079,28 @@ async function tick() {
           if (prUrl) {
             log(`PR URL: ${prUrl}`)
             await addComment(issue.number, `🤖 **PR opened:** ${prUrl}`)
+            prCreated = true
+          } else {
+            log('WARNING: Failed to create PR.')
+            await addComment(issue.number, `🤖 **Failed to create PR.** Please check the logs. Branch: \`${branch}\``)
           }
+
+          if (prCreated) {
+            // We explicitly remove 'ready' again here just in case the start-time removal failed or race condition occurred.
+            const labelsToAdd = [labels.inReview];
+            if (reviewSkipped) labelsToAdd.push(labels.reviewSkipped);
+            await swapLabels(issue.number, [labels.inProgress, labels.ready], labelsToAdd)
+          } else {
+            await swapLabels(issue.number, [labels.inProgress, labels.ready], labels.fixme)
+          }
+        } else {
+          // Update PR
+          const labelsToAdd = [labels.inReview];
+          if (reviewSkipped) labelsToAdd.push(labels.reviewSkipped);
+          
+          await addComment(issue.number, `🤖 **PR updated with review fixes:** ${existingPR.url}`)
+          await swapLabels(issue.number, [labels.inProgress, labels.ready], labelsToAdd)
         }
-        // Always swap to in review if we didn't crash before this.
-        // We explicitly remove 'ready' again here just in case the start-time removal failed or race condition occurred.
-        await swapLabels(issue.number, [labels.inProgress, labels.ready], labels.inReview)
-      } else {
-        // Update PR
-        await addComment(issue.number, `🤖 **PR updated with review fixes:** ${existingPR.url}`)
-        await swapLabels(issue.number, [labels.inProgress, labels.ready], labels.inReview)
       }
 
       success = true

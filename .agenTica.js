@@ -62,6 +62,7 @@ export default {
     inReview: 'autobot:in-review',
     question: 'autobot:question',
     fixme: 'autobot:fixme',
+    reviewSkipped: 'autobot:reviewSkipped',
   },
 
   /**
