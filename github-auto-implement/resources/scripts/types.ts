@@ -14,6 +14,7 @@
  */
 
 import { z } from 'zod'
+import { Hookable as BaseHookable } from 'hookable'
 import type {
   labelConfigSchema,
   githubIssueSchema,
@@ -47,116 +48,444 @@ import type {
 // ── Shared entity types (inferred from Zod schemas) ──────────────────────────
 
 /** Label names used throughout the workflow */
-export type LabelConfig = z.infer<typeof labelConfigSchema>
+export interface LabelConfig {
+  /** Issue is ready for implementation (default: 'autobot:ready') */
+  ready: string
+  /** Issue is currently being implemented (default: 'autobot:in-progress') */
+  inProgress: string
+  /** PR is open and needs review (default: 'autobot:in-review') */
+  inReview: string
+  /** Clarification is needed from a human (default: 'autobot:question') */
+  question: string
+  /** Implementation has failed or needs manual fix (default: 'autobot:fixme') */
+  fixme: string
+  /** PR review was skipped for some reason (default: 'autobot:reviewSkipped') */
+  reviewSkipped: string
+}
 
 /** A GitHub issue as returned by `gh issue view --json` */
-export type GitHubIssue = z.infer<typeof githubIssueSchema>
+export interface GitHubIssue {
+  /** The issue number */
+  number: number
+  /** The summary/title of the issue */
+  title: string
+  /** Full description of the issue in markdown */
+  body: string
+  /** Web URL for browsing */
+  url: string
+  /** List of labels attached to the issue */
+  labels: Array<{ name: string }>
+  /** List of conversation comments */
+  comments?: Array<{
+    body: string
+    author?: { login: string }
+  }>
+}
 
 /** A GitHub pull request as returned by `gh pr view --json` */
-export type GitHubPR = z.infer<typeof githubPRSchema>
+export interface GitHubPR {
+  /** The pull request number */
+  number: number
+  /** The summary/title of the PR */
+  title: string
+  /** Full description/body of the PR */
+  body: string
+  /** Current state of the PR (OPEN, CLOSED, MERGED) */
+  state: string
+  /** Name of the head branch (the one containing changes) */
+  headRefName: string
+  /** Name of the target branch (usually main or master) */
+  baseRefName: string
+  /** Web URL for browsing */
+  url: string
+}
 
 /** A planned issue produced by PRD decomposition */
-export type PlannedIssue = z.infer<typeof plannedIssueSchema>
+export interface PlannedIssue {
+  /** Recommended issue title */
+  title: string
+  /** Detailed issue description/requirements */
+  body: string
+  /** Labels to apply when creating the issue */
+  labels?: string[]
+}
 
 /** Signature of the internal `gh()` helper passed to config callbacks */
-export type GhFunction = (cmd: string, asJson?: boolean) => unknown
+export type GhFunction = (cmd: string, asJson?: boolean) => any
 
 /**
  * Per-agent runtime configuration (camelCase keys).
- * Inferred from agentConfigSchema — Zod is the single source of truth.
- * Function fields carry precise TypeScript signatures via z.custom<T>.
+ * This defines how a specific agent (like Claude or a local CLI) is executed.
  */
-export type AgentConfig = z.infer<typeof agentConfigSchema>
+export interface AgentConfig {
+  /** Unique identifier for the agent (e.g. 'claude') */
+  id: string
+  /** Friendly display name */
+  name: string
+  /** Raw persona prompt segment */
+  prompt: string
+  /** Path to a markdown skill file relative to PROJECT_ROOT */
+  promptFile?: string
+  /** Legacy: fallback path to SKILL.md */
+  skillFile?: string
+  /** The base shell command to execute (default: 'claude') */
+  command: string
+  /** List of model names this agent can use */
+  models?: string[]
+  /** Default model name */
+  model: string
+  /** Resolved label configurations for the agent */
+  labels: LabelConfig
+  /** Branch name prefix (default: 'autobot/') */
+  branchPrefix: string
+  
+  /** CLI arguments builder for the spawn command */
+  args: string[] | ((agent: AgentConfig, model: string) => string[])
+  /** Builder for searching ready issues */
+  buildQuery: (labels: LabelConfig) => string
+  /** Picker for selecting one issue from a list */
+  pickIssue: (issues: GitHubIssue[]) => GitHubIssue | null
+  /** Returns true if an issue has unmet dependencies */
+  isBlocked: (issue: GitHubIssue, gh: GhFunction) => boolean
+  /** Resolves the base branch for a task branch */
+  getBaseBranch: (issue: GitHubIssue, gh: GhFunction, defaultBranch: string) => string | Promise<string>
+  /** Resolves the full skill text for the agent prompt */
+  getSkill?: (agent: AgentConfig, issue: GitHubIssue) => string
+  /** Selects the specific model name for an issue */
+  getModel: (agent: AgentConfig, issue: GitHubIssue) => string
+  /** Returns the extra instructions for the coding phase */
+  getCodePrompt?: (issue: GitHubIssue, prd: GitHubIssue | null, agent: AgentConfig) => string
+  /** Returns the system prompt for the review phase */
+  getReviewSkill?: (issue: GitHubIssue, prd: GitHubIssue | null, agent: AgentConfig) => string
+}
 
 /** Context passed to `getAgent` to indicate which step is running */
 export interface AgentSelectionContext {
+  /** Current phase of the workflow */
   step: 'coding' | 'review'
+  /** Epic context if available */
   prdInfo?: GitHubIssue | null
 }
 
 // ── Process context types (inferred from Zod schemas) ────────────────────────
 
+// ── Process context types ───────────────────────────────────────────────────
+
 /** Context for `onStart` — called once when the daemon process starts */
-export type StartContext = z.infer<typeof startContextSchema>
+export interface StartContext {
+  /** Timestamp when the daemon process was launched */
+  timestamp: Date
+  /** The configured poll interval */
+  pollIntervalMs: number
+  /** Path to the log file being used */
+  logFile: string
+  /** List of loaded agent IDs */
+  agents: string[]
+}
 
 /** Context for `onStop` — called once when the daemon process stops */
-export type StopContext = z.infer<typeof stopContextSchema>
+export interface StopContext {
+  /** The signal that triggered the shutdown (e.g. SIGINT) */
+  signal: string
+  /** Timestamp when the daemon process is shutting down */
+  timestamp: Date
+  /** Duration in milliseconds since the daemon started */
+  uptimeMs: number
+}
 
 // ── Tick context types ────────────────────────────────────────────────────────
 
 /** Context for `preLoop` / `postLoop` — fires on every poll tick */
-export type LoopContext = z.infer<typeof loopContextSchema>
+export interface LoopContext {
+  /** Sequential iteration number starting from 0 */
+  tick: number
+  /** Timestamp when this poll loop started */
+  startedAt: Date
+}
 
 // ── Issue management context types ───────────────────────────────────────────
 
 /** Context for `preListIssues` / `postListIssues` */
-export type ListIssuesContext = z.infer<typeof listIssuesContextSchema>
+export interface ListIssuesContext {
+  /** The GitHub search query being executed */
+  query: string
+  /** The list of issues retrieved (populated in postListIssues) */
+  issues?: GitHubIssue[]
+}
 
 /** Context for `prePickIssue` / `postPickIssue` */
-export type PickIssueContext = z.infer<typeof pickIssueContextSchema>
+export interface PickIssueContext {
+  /** All ready issues discovered in this tick */
+  issues: GitHubIssue[]
+  /** The issue selected for implementation (populated in postPickIssue) */
+  picked?: GitHubIssue | null
+}
 
 /** Context for `preGetIssue` / `postGetIssue` */
-export type GetIssueContext = z.infer<typeof getIssueContextSchema>
+export interface GetIssueContext {
+  /** The number of the issue being fetched */
+  issueNumber: number
+  /** The issue details retrieved (populated in postGetIssue) */
+  issue?: GitHubIssue
+}
 
 /** Context for `preSetLabel` / `postSetLabel` */
-export type SetLabelContext = z.infer<typeof setLabelContextSchema>
+export interface SetLabelContext {
+  /** The issue number to update */
+  issueNumber: number
+  /** List of label names to add (e.g. ["autobot:in-progress"]) */
+  add: string[]
+  /** List of label names to remove (e.g. ["autobot:ready"]) */
+  remove: string[]
+}
 
 /** Context for `preAddComment` / `postAddComment` */
-export type AddCommentContext = z.infer<typeof addCommentContextSchema>
+export interface AddCommentContext {
+  /** The issue/PR number to comment on */
+  issueNumber: number
+  /** The body of the comment (markdown) */
+  body: string
+  /** The resulting comment ID (populated in postAddComment) */
+  commentId?: number | null
+}
 
 // ── Task execution context types ──────────────────────────────────────────────
 
 /** Context for `preGetBaseBranch` / `postGetBaseBranch` */
-export type GetBaseBranchContext = z.infer<typeof getBaseBranchContextSchema>
+export interface GetBaseBranchContext {
+  /** The issue being implemented */
+  issue: GitHubIssue
+  /** Default fallback branch (usually main/master) */
+  defaultBranch: string
+  /** The resolved base branch (populated in postGetBaseBranch) */
+  baseBranch?: string
+}
 
 /** Context for `preBuildPrompt` / `postBuildPrompt` */
-export type BuildPromptContext = z.infer<typeof buildPromptContextSchema>
+export interface BuildPromptContext {
+  /** The original GitHub issue being implemented */
+  issue: GitHubIssue
+  /** The agent configuration being used */
+  agent: AgentConfig
+  /** The name of the branch for this task */
+  branch: string
+  /** The base branch (e.g. main or epic branch) */
+  baseBranch: string
+  /** The repository default branch (e.g. 'master' or 'main') */
+  defaultBranch: string
+  /** The current workflow step ('coding' or 'review') */
+  step: 'coding' | 'review'
+  /** The PRD issue if this task belongs to an Epic */
+  prd?: GitHubIssue | null
+
+  // Prompt components
+  /** The persona/system prompt section from the agent config */
+  persona?: string
+  /** The skill/workflow section (usually read from markdown) */
+  skill?: string
+  /** The combined persona and skill block */
+  combined?: string
+  /** Step-specific instructions (e.g. git diff commands for the review phase) */
+  stepInstructions?: string
+  /** The combined instructions after {{ID}} etc. template variables are replaced */
+  instructions?: string
+  /** The raw body of the implementation issue */
+  body?: string
+  /** The formatted labels section included in the prompt */
+  labelSection?: string
+  /** The formatted comments section included in the prompt */
+  commentSection?: string
+  /** The final full prompt string passed to the agent's STDIN */
+  prompt?: string
+}
 
 /** Context for `preBuildRevisionPrompt` / `postBuildRevisionPrompt` */
-export type BuildRevisionPromptContext = z.infer<typeof buildRevisionPromptContextSchema>
+export interface BuildRevisionPromptContext {
+  /** The original GitHub issue */
+  issue: GitHubIssue
+  /** The associated open pull request */
+  pr: GitHubPR
+
+  // Prompt components
+  /** The implementation issue body */
+  body?: string
+  /** The formatted labels section */
+  labelSection?: string
+  /** The formatted issue comments section */
+  issueCommentSection?: string
+  /** The PR context (diffs, review comments, etc.) */
+  prContext?: string
+  /** The final full prompt string passed to the agent's STDIN */
+  prompt?: string
+}
 
 /** Context for `preSpawnAgent` / `postSpawnAgent` */
-export type SpawnAgentContext = z.infer<typeof spawnAgentContextSchema>
+export interface SpawnAgentContext {
+  /** The agent config being executed */
+  agent: AgentConfig
+  /** The issue context */
+  issue: GitHubIssue
+  /** Resolved model name (e.g. claude-3-5-sonnet-latest) */
+  model?: string
+  /** Final CLI arguments list for the spawn command */
+  args?: string[]
+  /** Final full prompt being piped to STDIN */
+  prompt: string
+  /** The raw text output received from the agent (populated in postSpawnAgent) */
+  output?: string
+}
 
 /** Context for `preStartTask` / `postStartTask` */
-export type StartTaskContext = z.infer<typeof startTaskContextSchema>
+export interface StartTaskContext {
+  /** The issue to start */
+  issue: GitHubIssue
+  /** The selected agent */
+  agent: AgentConfig
+  /** Name of the new branch */
+  branch: string
+  /** Resolved base branch */
+  baseBranch: string
+}
 
 /** Context for `preAutoCommit` / `postAutoCommit` */
-export type AutoCommitContext = z.infer<typeof autoCommitContextSchema>
+export interface AutoCommitContext {
+  /** The calculated commit message */
+  message: string
+}
 
 // ── Review context types ──────────────────────────────────────────────────────
 
 /** Context for `preGetReviewSkill` / `postGetReviewSkill` */
-export type GetReviewSkillContext = z.infer<typeof getReviewSkillContextSchema>
+export interface GetReviewSkillContext {
+  /** The implementation issue */
+  issue: GitHubIssue
+  /** Epic PRD context */
+  prd: GitHubIssue | null
+  /** Selected reviewer agent */
+  agent: AgentConfig
+  /** Final skill/system prompt for review (populated in postGetReviewSkill) */
+  skill?: string
+}
 
 /** Context for `preStartReview` / `postStartReview` */
-export type StartReviewContext = z.infer<typeof startReviewContextSchema>
+export interface StartReviewContext {
+  /** The implementation issue */
+  issue: GitHubIssue
+  /** The open pull request to review */
+  pr: GitHubPR
+}
 
 // ── PR context types ──────────────────────────────────────────────────────────
 
 /** Context for `preCreatePullRequest` / `postCreatePullRequest` */
-export type CreatePullRequestContext = z.infer<typeof createPullRequestContextSchema>
+export interface CreatePullRequestContext {
+  /** The implementation issue */
+  issue: GitHubIssue
+  /** Branch name to push */
+  branch: string
+  /** Target base branch */
+  baseBranch: string
+  /** Generated PR title */
+  title: string
+  /** Generated PR body (markdown) */
+  body: string
+  /** Resulting PR URL (populated in postCreatePullRequest) */
+  url?: string
+}
 
 // ── Planning workflow context types ───────────────────────────────────────────
 
 /** Context for `preGrillMe` / `postGrillMe` */
-export type GrillMeContext = z.infer<typeof grillMeContextSchema>
+export interface GrillMeContext {
+  /** Descriptive name of the epic/feature */
+  epicName: string
+  /** Raw requirements provided at the start of the session */
+  requirements: string
+  /** Prompt used for the grill interaction */
+  prompt?: string
+  /** Resulting conceptual summary (populated in postGrillMe) */
+  summary?: string
+}
 
 /** Context for `preWritePrd` / `postWritePrd` */
-export type WritePrdContext = z.infer<typeof writePrdContextSchema>
+export interface WritePrdContext {
+  /** Name of the epic */
+  epicName: string
+  /** Context summary from the GRILL phase */
+  grillSummary: string
+
+  // PRD sections
+  /** Problem context and background info */
+  problemStatement?: string
+  /** Proposed high-level solution */
+  solution?: string
+  /** Concrete user stories to implement */
+  userStories?: string
+  /** Technical design choices and architecture */
+  implementationDecisions?: string
+  /** Quality and testing strategy */
+  testingDecisions?: string
+  /** Intentional non-goals and exclusions */
+  outOfScope?: string
+  /** Planned delivery roadmap */
+  roadmap?: string
+  /** Miscellaneous context or reference material */
+  notes?: string
+
+  /** Prompt used to generate the document */
+  prompt?: string
+  /** Final resulting PRD markdown (populated in postWritePrd) */
+  prd?: string
+}
 
 /** Context for `prePrdToIssues` / `postPrdToIssues` */
-export type PrdToIssuesContext = z.infer<typeof prdToIssuesContextSchema>
+export interface PrdToIssuesContext {
+  /** Source PRD markdown */
+  prd: string
+  /** Prompt used for the decomposition process */
+  prompt?: string
+  /** Generated list of planned tickets (populated in postPrdToIssues) */
+  issues?: PlannedIssue[]
+}
 
 /** Context for `preCreateGitHubIssue` / `postCreateGitHubIssue` */
-export type CreateGitHubIssueContext = z.infer<typeof createGitHubIssueContextSchema>
+export interface CreateGitHubIssueContext {
+  /** The planned ticket data */
+  issue: PlannedIssue
+  /** Prompt for formatting the ticket (if any) */
+  prompt?: string
+  /** Resulting GitHub issue number (populated in postCreateGitHubIssue) */
+  issueNumber?: number
+}
 
 /** Context for `preCreateEpicBranch` / `postCreateEpicBranch` */
-export type CreateEpicBranchContext = z.infer<typeof createEpicBranchContextSchema>
+export interface CreateEpicBranchContext {
+  /** Epic identifier */
+  epicName: string
+  /** Main PRD issue number */
+  prdIssueNumber: number
+  /** Prompt (if any) */
+  prompt?: string
+  /** Resulting branch name (populated in postCreateEpicBranch) */
+  branch?: string
+}
 
 // ── Hook map ──────────────────────────────────────────────────────────────────
 
-type HookFn<T> = (ctx: T) => void | Promise<void>
+type HookFn<T> = (ctx: Readonly<T>) => void | Partial<T> | Promise<void | Partial<T>>
+
+/**
+ * A type-safe wrapper around hookable's Hookable class.
+ * Ensures that hooks can return Partial<Context> for merging, which satisfies the
+ * "pure hooks" requirement while maintaining full TypeScript safety for hook authors.
+ */
+export type HookableWithReturns<T extends Record<string, any>> = Omit<
+  BaseHookable<any>,
+  'hook' | 'addHooks'
+> & {
+  hook<N extends keyof T>(name: N, fn: T[N]): () => void
+  addHooks(hooks: Partial<T>): () => void
+}
 
 /**
  * Typed map of every hook name to its handler signature.
@@ -306,4 +635,14 @@ export interface AgenTicaConfig {
 
   /** Lifecycle hooks, keyed by hook name */
   hooks?: Partial<AgenTicaHookMap>
+}
+
+/** Config + runtime state used by the daemon class */
+export interface AgenTicaContext extends Omit<AgenTicaConfig, 'hooks'> {
+  hooks: HookableWithReturns<AgenTicaHookMap>
+  userConfig: AgenTicaConfig
+  logFile: string
+  pollIntervalMs: number
+  labels: LabelConfig
+  agents: Record<string, AgentConfig>
 }

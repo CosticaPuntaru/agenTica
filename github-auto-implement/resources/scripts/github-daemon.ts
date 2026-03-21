@@ -37,6 +37,7 @@ import type {
   LabelConfig,
   GhFunction,
   AgentSelectionContext,
+  AgenTicaContext,
 } from './types'
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -54,14 +55,7 @@ function findProjectRoot(): string {
 }
 const PROJECT_ROOT = findProjectRoot()
 
-async function loadConfig(): Promise<AgenTicaConfig & {
-  userConfig: AgenTicaConfig;
-  hooks: Hookable<AgenTicaHookMap>;
-  logFile: string;
-  pollIntervalMs: number;
-  labels: LabelConfig;
-  agents: Record<string, AgentConfig>;
-}> {
+async function loadConfig(): Promise<AgenTicaContext> {
   const globalDefaults = {
     pollIntervalMs: 300_000,
     logFile: resolve(SKILL_TMP_DIR, 'github-daemon.log'),
@@ -277,14 +271,7 @@ Do not ask for permission. Fix problems directly.`,
   }
 }
 
-let CONFIG: (AgenTicaConfig & {
-  hooks: Hookable<AgenTicaHookMap>;
-  userConfig: AgenTicaConfig;
-  logFile: string;
-  pollIntervalMs: number;
-  labels: LabelConfig;
-  agents: Record<string, AgentConfig>;
-}) | null = null
+let CONFIG: AgenTicaContext | null = null
 
 mkdirSync(SKILL_TMP_DIR, { recursive: true })
 
@@ -699,16 +686,6 @@ function getPRContext(prNumber: number): string {
 
 async function buildRevisionPrompt(issue: GitHubIssue, pr: GitHubPR): Promise<string> {
   if (!CONFIG) return ''
-  const ctx = { issue, pr }
-  await callStep(CONFIG.hooks, 'preBuildRevisionPrompt', ctx)
-
-  const ctxAny = ctx as any
-  if (ctxAny.prompt) {
-    await callStep(CONFIG.hooks, 'postBuildRevisionPrompt', ctxAny)
-    return ctxAny.prompt
-  }
-
-  const branch = pr.headRefName
 
   const full = gh(
     `issue view ${issue.number} --json body,labels,comments`,
@@ -730,6 +707,22 @@ async function buildRevisionPrompt(issue: GitHubIssue, pr: GitHubPR): Promise<st
 
   const prContext = getPRContext(pr.number)
 
+  const ctx = {
+    issue,
+    pr,
+    body,
+    labelSection,
+    issueCommentSection,
+    prContext,
+  } as any
+  await callStep(CONFIG.hooks, 'preBuildRevisionPrompt', ctx)
+
+  if (ctx.prompt) {
+    await callStep(CONFIG.hooks, 'postBuildRevisionPrompt', ctx)
+    return ctx.prompt
+  }
+
+  const branch = pr.headRefName
   const prompt = `# Revision Mode \u2014 Resolve PR Feedback
 
 You have been given a GitHub issue that already has an open PR (#${pr.number}).
@@ -801,33 +794,26 @@ Print \`DONE\` as the very last line.
 
 ## Original Issue: #${issue.number} \u2014 ${issue.title}
 
-${body}
+${ctx.body}
 
-${labelSection}
+${ctx.labelSection}
 
-${issueCommentSection}
+${ctx.issueCommentSection}
 
 ---
 
 ## PR #${pr.number} \u2014 ${pr.title}
 
-${prContext}
+${ctx.prContext}
 `.trim()
 
-  ctxAny.prompt = prompt
-  await callStep(CONFIG.hooks, 'postBuildRevisionPrompt', ctxAny)
-  return ctxAny.prompt
+  ctx.prompt = prompt
+  await callStep(CONFIG.hooks, 'postBuildRevisionPrompt', ctx)
+  return ctx.prompt
 }
 
 async function buildPrompt(agent: AgentConfig, issue: GitHubIssue, branch: string, baseBranch: string, defaultBranch: string, step: string = 'coding', prd: GitHubIssue | null = null, skillOverride: string | null = null): Promise<string> {
   if (!CONFIG) return ''
-  const ctx = { issue, agent, branch, baseBranch, step } as any
-  await callStep(CONFIG.hooks, 'preBuildPrompt', ctx)
-
-  if (ctx.prompt) {
-    await callStep(CONFIG.hooks, 'postBuildPrompt', ctx)
-    return ctx.prompt
-  }
 
   let workflow = ''
   if (agent.promptFile) {
@@ -872,14 +858,6 @@ Review these changes, check them against the requirements, and make fixes where 
 `
   }
 
-  const instructions = (combined + '\n' + stepInstructions)
-    .replaceAll('{{BRANCH_NAME}}', branch)
-    .replaceAll('{{BASE_BRANCH}}', baseBranch)
-    .replaceAll('{{ISSUE_ID}}', String(issue.number))
-    .replaceAll('{{ISSUE_TITLE}}', issue.title)
-    .replaceAll('{{ISSUE_URL}}', issue.url)
-    .replaceAll('origin/master', `origin/${defaultBranch}`)
-
   const full = gh(`issue view ${issue.number} --json body,labels,comments`, true) as any
   const body = full?.body ?? issue.body ?? '(no description provided)'
 
@@ -893,17 +871,48 @@ Review these changes, check them against the requirements, and make fixes where 
       ? `### Comments\n${comments.map((c: any, i: number) => `**Comment ${i + 1}** (by ${c.author?.login ?? 'unknown'}):\n${c.body}`).join('\n\n---\n\n')}`
       : ''
 
+  const ctx = {
+    issue,
+    agent,
+    branch,
+    baseBranch,
+    defaultBranch,
+    step,
+    prd,
+    persona,
+    skill,
+    combined,
+    stepInstructions,
+    body,
+    labelSection,
+    commentSection,
+  } as any
+  await callStep(CONFIG.hooks, 'preBuildPrompt', ctx)
+
+  if (ctx.prompt) {
+    await callStep(CONFIG.hooks, 'postBuildPrompt', ctx)
+    return ctx.prompt
+  }
+
+  const instructions = (ctx.combined + '\n' + ctx.stepInstructions)
+    .replaceAll('{{BRANCH_NAME}}', ctx.branch)
+    .replaceAll('{{BASE_BRANCH}}', ctx.baseBranch)
+    .replaceAll('{{ISSUE_ID}}', String(ctx.issue.number))
+    .replaceAll('{{ISSUE_TITLE}}', ctx.issue.title)
+    .replaceAll('{{ISSUE_URL}}', ctx.issue.url)
+    .replaceAll('origin/master', `origin/${ctx.defaultBranch}`)
+
   ctx.prompt = `${instructions}
 
 ---
 
-${prd ? `## Parent PRD\n\n### ${prd.title}\n\n### ${prd.body}\n\n---\n\n` : ''}## Issue to implement: #${issue.number} \u2014 ${issue.title}
+${ctx.prd ? `## Parent PRD\n\n### ${ctx.prd.title}\n\n### ${ctx.prd.body}\n\n---\n\n` : ''}## Issue to implement: #${ctx.issue.number} \u2014 ${ctx.issue.title}
 
-${body}
+${ctx.body}
 
-${labelSection}
+${ctx.labelSection}
 
-${commentSection}
+${ctx.commentSection}
 `.trim()
 
   await callStep(CONFIG.hooks, 'postBuildPrompt', ctx)
@@ -912,6 +921,7 @@ ${commentSection}
 
 // Track the active child so we can kill it on exit
 let activeChild: ChildProcess | null = null
+const startTime = new Date()
 
 // ── Sleep prevention (Windows only) ──────────────────────────────────────────
 
@@ -948,15 +958,16 @@ function disableSleepPrevention() {
 
 async function spawnAgent(agent: AgentConfig, issue: GitHubIssue, prompt: string): Promise<string> {
   if (!CONFIG) throw new Error('Daemon not initialized')
-  const ctx = { agent, issue, prompt } as any
+  const model = agent.getModel(agent, issue)
+  const args = typeof agent.args === 'function' ? agent.args(agent, model) : agent.args
+
+  const ctx = { agent, issue, model, args, prompt } as any
   await callStep(CONFIG.hooks, 'preSpawnAgent', ctx)
 
   return new Promise((resolve, reject) => {
-    const model = ctx.agent.getModel(ctx.agent, ctx.issue)
-    const args = typeof ctx.agent.args === 'function' ? ctx.agent.args(ctx.agent, model) : ctx.agent.args
-    log(`Spawning ${ctx.agent.command} ${args.join(' ')} (model: ${model}) ...`)
+    log(`Spawning ${ctx.agent.command} ${ctx.args.join(' ')} (model: ${ctx.model}) ...`)
 
-    const child = spawn(ctx.agent.command, args, {
+    const child = spawn(ctx.agent.command, ctx.args, {
       cwd: PROJECT_ROOT,
       env: { ...process.env, ANTHROPIC_API_KEY: undefined },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -1412,6 +1423,7 @@ async function main() {
   if (CONFIG.userConfig.onStart) {
     try {
       await CONFIG.userConfig.onStart({
+        timestamp: startTime,
         pollIntervalMs: CONFIG.pollIntervalMs,
         logFile: CONFIG.logFile,
         agents: Object.keys(CONFIG.agents),
@@ -1443,7 +1455,11 @@ async function shutdown(signal: string) {
   }
   if (CONFIG?.userConfig?.onStop) {
     try {
-      await CONFIG.userConfig.onStop({ signal })
+      await CONFIG.userConfig.onStop({
+        signal,
+        timestamp: new Date(),
+        uptimeMs: Date.now() - startTime.getTime(),
+      })
     } catch (err: any) {
       log(`Warning: onStop failed: ${err.message}`)
     }

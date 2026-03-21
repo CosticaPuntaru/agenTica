@@ -9,7 +9,7 @@
 import { createHooks } from 'hookable'
 import type { Hookable } from 'hookable'
 import { z } from 'zod'
-import type { AgenTicaHookMap } from './types'
+import type { AgenTicaHookMap, HookableWithReturns } from './types'
 import {
   loopContextSchema,
   listIssuesContextSchema,
@@ -92,8 +92,8 @@ function serializeCtx(obj: unknown): string {
  * Instantiate the typed hookable instance. Call once at daemon startup and
  * pass the result through to every `callStep` invocation.
  */
-function createDaemonHooks(): Hookable<AgenTicaHookMap> {
-  return createHooks<AgenTicaHookMap>()
+function createDaemonHooks(): HookableWithReturns<AgenTicaHookMap> {
+  return createHooks() as any
 }
 
 /**
@@ -107,7 +107,7 @@ function createDaemonHooks(): Hookable<AgenTicaHookMap> {
  * 6. On hook error: re-throws with step name context attached.
  */
 async function callStep<N extends keyof AgenTicaHookMap>(
-  hooks: Hookable<AgenTicaHookMap>,
+  hooks: HookableWithReturns<AgenTicaHookMap>,
   name: N,
   ctx: Parameters<AgenTicaHookMap[N]>[0],
 ): Promise<void> {
@@ -126,11 +126,29 @@ async function callStep<N extends keyof AgenTicaHookMap>(
 
   // Hook invocation
   try {
-    // TypeScript cannot resolve InferCallback<AgenTicaHookMap, N> ≡ AgenTicaHookMap[N] in a generic
-    // context because InferCallback is a deferred conditional type — a known TS/hookable limitation.
-    // The call is type-safe at runtime: every hook in AgenTicaHookMap accepts exactly one context arg.
-    // @ts-expect-error -- deferred InferCallback conditional prevents generic narrowing
-    await hooks.callHook(name, ctx)
+    // Collect and merge partial returns from each hook. This allows hooks to be
+    // pure (returning overrides) while still supporting legacy in-place mutation.
+    const partialSchema = (schema as z.ZodObject<any>).partial()
+ 
+    await (hooks as any).callHookWith(async (handlers: any[], args: any[]) => {
+      const context = args[0]
+      for (const handler of handlers) {
+        const result = await (handler as any)(context)
+        if (result && typeof result === 'object') {
+          // Validate partial return against the schema
+          const parse = partialSchema.safeParse(result)
+          if (!parse.success) {
+            console.error(
+              JSON.stringify({ step: name, phase: 'partial-return', issues: parse.error.issues }),
+            )
+            throw new Error(
+              `[callStep] Invalid context for step "${name}" (post) — invalid partial return: ${parse.error.message}`,
+            )
+          }
+          Object.assign(context, parse.data)
+        }
+      }
+    }, name, [ctx] as any)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     throw new Error(`[callStep] Hook error in step "${name}": ${msg}`, { cause: err })

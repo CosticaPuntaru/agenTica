@@ -10,7 +10,7 @@ export default {
   // ── Core Configuration ──────────────────────────────────────────────────────
 
   /** Poll interval in milliseconds (default: 300,000 / 5 min) */
-  pollIntervalMs: 300_000,
+  pollIntervalMs: 30_000,
 
   /** Path to the log file (default: tmp/github-daemon.log) */
   logFile: 'tmp/github-daemon.log',
@@ -85,11 +85,11 @@ export default {
     // Task Execution
     preGetBaseBranch: async (ctx) => { /* ctx: { issue, defaultBranch, baseBranch? } */ },
     postGetBaseBranch: async (ctx) => { },
-    preBuildPrompt: async (ctx) => { /* ctx: { issue, agent, branch, baseBranch, step, prompt? } */ },
+    preBuildPrompt: async (ctx) => { /* ctx: { issue, agent, branch, baseBranch, defaultBranch, step, prd?, persona?, skill?, combined?, stepInstructions?, instructions?, body?, labelSection?, commentSection?, prompt? } */ },
     postBuildPrompt: async (ctx) => { },
-    preBuildRevisionPrompt: async (ctx) => { /* ctx: { issue, pr, prompt? } */ },
+    preBuildRevisionPrompt: async (ctx) => { /* ctx: { issue, pr, body?, labelSection?, issueCommentSection?, prContext?, prompt? } */ },
     postBuildRevisionPrompt: async (ctx) => { },
-    preSpawnAgent: async (ctx) => { /* ctx: { issue, agent, model, args, prompt } */ },
+    preSpawnAgent: async (ctx) => { /* ctx: { issue, agent, model?, args?, prompt, output? } */ },
     postSpawnAgent: async (ctx) => { },
     preStartTask: async (ctx) => { /* ctx: { issue, agent, branch, baseBranch } */ },
     postStartTask: async (ctx) => { },
@@ -107,9 +107,9 @@ export default {
     postCreatePullRequest: async (ctx) => { },
 
     // Planning (Epic Workflow)
-    preGrillMe: async (ctx) => { },
+    preGrillMe: async (ctx) => { /* ctx: { epicName, requirements, prompt?, summary? } */ },
     postGrillMe: async (ctx) => { },
-    preWritePrd: async (ctx) => { },
+    preWritePrd: async (ctx) => { /* ctx: { epicName, grillSummary, problemStatement?, solution?, userStories?, implementationDecisions?, testingDecisions?, outOfScope?, roadmap?, notes?, prompt?, prd? } */ },
     postWritePrd: async (ctx) => { },
     prePrdToIssues: async (ctx) => { },
     postPrdToIssues: async (ctx) => { },

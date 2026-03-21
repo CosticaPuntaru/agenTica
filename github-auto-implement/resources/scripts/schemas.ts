@@ -200,6 +200,16 @@ export const buildPromptContextSchema = z.object({
   branch: z.string(),
   baseBranch: z.string(),
   step: z.enum(['coding', 'review']),
+  defaultBranch: z.string().optional(),
+  prd: githubIssueSchema.nullable().optional(),
+  persona: z.string().optional(),
+  skill: z.string().optional(),
+  combined: z.string().optional(),
+  stepInstructions: z.string().optional(),
+  instructions: z.string().optional(),
+  body: z.string().optional(),
+  labelSection: z.string().optional(),
+  commentSection: z.string().optional(),
   prompt: z.string().optional(),
 })
 
@@ -207,6 +217,10 @@ export const buildPromptContextSchema = z.object({
 export const buildRevisionPromptContextSchema = z.object({
   issue: githubIssueSchema,
   pr: githubPRSchema,
+  body: z.string().optional(),
+  labelSection: z.string().optional(),
+  issueCommentSection: z.string().optional(),
+  prContext: z.string().optional(),
   prompt: z.string().optional(),
 })
 
@@ -214,6 +228,8 @@ export const buildRevisionPromptContextSchema = z.object({
 export const spawnAgentContextSchema = z.object({
   agent: agentConfigSchema,
   issue: githubIssueSchema,
+  model: z.string().optional(),
+  args: z.array(z.string()).optional(),
   prompt: z.string(),
   output: z.string().optional(),
 })
@@ -272,6 +288,7 @@ export const createPullRequestContextSchema = z.object({
 export const grillMeContextSchema = z.object({
   epicName: z.string(),
   requirements: z.string(),
+  prompt: z.string().optional(),
   summary: z.string().optional(),
 })
 
@@ -279,18 +296,29 @@ export const grillMeContextSchema = z.object({
 export const writePrdContextSchema = z.object({
   epicName: z.string(),
   grillSummary: z.string(),
+  problemStatement: z.string().optional(),
+  solution: z.string().optional(),
+  userStories: z.string().optional(),
+  implementationDecisions: z.string().optional(),
+  testingDecisions: z.string().optional(),
+  outOfScope: z.string().optional(),
+  roadmap: z.string().optional(),
+  notes: z.string().optional(),
+  prompt: z.string().optional(),
   prd: z.string().optional(),
 })
 
 /** Schema for PrdToIssuesContext — `prePrdToIssues` / `postPrdToIssues` */
 export const prdToIssuesContextSchema = z.object({
   prd: z.string(),
+  prompt: z.string().optional(),
   issues: z.array(plannedIssueSchema).optional(),
 })
 
 /** Schema for CreateGitHubIssueContext — `preCreateGitHubIssue` / `postCreateGitHubIssue` */
 export const createGitHubIssueContextSchema = z.object({
   issue: plannedIssueSchema,
+  prompt: z.string().optional(),
   issueNumber: z.number().int().positive().optional(),
 })
 
@@ -298,5 +326,6 @@ export const createGitHubIssueContextSchema = z.object({
 export const createEpicBranchContextSchema = z.object({
   epicName: z.string(),
   prdIssueNumber: z.number().int().positive(),
+  prompt: z.string().optional(),
   branch: z.string().optional(),
 })

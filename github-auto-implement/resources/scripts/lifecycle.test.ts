@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { createDaemonHooks, callStep } from './lifecycle'
-import type { Hookable } from 'hookable'
-import type { AgenTicaHookMap, LoopContext } from './types'
+import type { AgenTicaHookMap, LoopContext, HookableWithReturns } from './types'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -22,15 +21,15 @@ describe('createDaemonHooks', () => {
 // ── callStep ──────────────────────────────────────────────────────────────────
 
 describe('callStep', () => {
-  let hooks: Hookable<AgenTicaHookMap>
+  let hooks: HookableWithReturns<AgenTicaHookMap>
 
   beforeEach(() => {
     hooks = createDaemonHooks()
   })
 
   it('pre-hook mutation is visible to subsequent hooks and reflected in ctx', async () => {
-    hooks.hook('preLoop', (ctx) => {
-      ctx.tick = 99
+    hooks.hook('preLoop', () => {
+      return { tick: 99 }
     })
 
     const ctx = makeLoopCtx({ tick: 0 })
@@ -40,14 +39,25 @@ describe('callStep', () => {
   })
 
   it('post-hook mutation is reflected in final ctx', async () => {
-    hooks.hook('postLoop', (ctx) => {
-      ctx.tick = 42
+    hooks.hook('postLoop', () => {
+      return { tick: 42 }
     })
 
     const ctx = makeLoopCtx({ tick: 0 })
     await callStep(hooks, 'postLoop', ctx)
 
     expect(ctx.tick).toBe(42)
+  })
+
+  it('hook partial return overwrites ctx', async () => {
+    hooks.hook('preLoop', () => {
+      return { tick: 99 }
+    })
+
+    const ctx = makeLoopCtx({ tick: 0 })
+    await callStep(hooks, 'preLoop', ctx)
+
+    expect(ctx.tick).toBe(99)
   })
 
   it('throws with step name when ctx is invalid before hooks (pre)', async () => {
@@ -58,8 +68,8 @@ describe('callStep', () => {
   })
 
   it('throws with step name when a hook mutates ctx to an invalid shape (post)', async () => {
-    hooks.hook('preLoop', (ctx) => {
-      ;(ctx as unknown as Record<string, unknown>).tick = 'not-a-number'
+    hooks.hook('preLoop', () => {
+      return { tick: 'not-a-number' as any }
     })
 
     const ctx = makeLoopCtx()
