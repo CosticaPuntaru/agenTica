@@ -24,12 +24,14 @@ Long-running workflows like Epics can exceed the model's context window. To main
    - After research: Save to `research-notes.md`.
 2. **"Stateless" Resumption**: If the session gets too long, instruct the user that you are "checkpointing". Next time you start, simply `view_file` on these summaries instead of re-processing the entire chat history.
 3. **Artifact-as-Truth**: Treat the generated files (PRD, Plan, Tasks) as the persistent source of truth. Read the latest file version from disk rather than relying on previous chat messages.
+4. **Subagent Delegation**: For Epics that span multiple domains or require deep research, **PROACTIVELY spawn subagents** via `browser_subagent` or generic `subagent` tools. Delegate specialized work like UI research, API deep-dives, or schema verification to them to keep your main context focused on the high-level orchestration.
 
 ## Steps
 
 ### Phase 0: Epic Initialization
 1. **Naming**: Propose a kebab-case name for the Epic (e.g., `team-billing-dashboard`).
 2. **Discovery (Autonomous)**: Use `improve-codebase-architecture` and `codebase-cleanup-tech-debt` to map the playing field. Answer your own technical questions by reading the codebase before asking the user.
+    - **SUBAGENT TIP**: If you find yourself reading more than 5 files in a row for research, spawn a subagent to "Analyze module X and summarize its public API/behavior" to keep your context footprint small.
 
 ### Phase 1: Requirement Drilling (The "Grill")
 3. **Initialize the Grill**
@@ -49,6 +51,7 @@ Long-running workflows like Epics can exceed the model's context window. To main
     - **REQUIRED TEMPLATE**: `resources/prd.md`
     - **User Presentation & Review**: After drafting, **PRESENT the PRD content in full to the user**. Explicitly ask for their review and if they would like to make any edits before it is pushed to GitHub. Do NOT proceed to Phase 4 until the user has confirmed they are happy with the PRD.
     - **Guardrail (Recursive Grill)**: If the agent encounters a significant unresolved dependency or technical gap during drafting, they **MUST re-trigger a mini-grill** focused on that specific gap before proceeding.
+    - **SUBAGENT TIP**: Delegate the drafting of the **Implementation Decisions** section (Schema, API contracts) to a specialized subagent if the codebase research was extensive.
 
 ### Phase 4: Planning & Decomposition
 7.  **Phase-Level Planning**: Use `prd-to-plan`.
@@ -84,6 +87,9 @@ Long-running workflows like Epics can exceed the model's context window. To main
       gh issue create --title "Task: ..." --body "$(cat task-N.md)" --label "task,${READY_LABEL}"
       ```
     - **Create tasks in dependency order** (blockers first), capturing each issue number before creating dependent tasks.
+12. **Update the Parent PRD with the Task Roadmap**
+    - **Goal**: Provide the daemon and humans with a complete, linked roadmap.
+    - **Action**: Once all tasks are created, use `gh issue edit <prd-issue-number> --body "<updated-prd-content>"` to fill in the `(#Issue-ID)` placeholders in the **Proposed Task Roadmap** section of the original PRD.
 
 ## Dependency & Branch Chain
 

@@ -38,6 +38,16 @@ The solution to the problem, from the user's perspective.
 
 A description of the things that are out of scope for this PRD.
 
+## Proposed Task Roadmap (REFERENCE ONLY)
+
+> [!IMPORTANT]
+> This section is for ARCHITECTURAL REFERENCE ONLY. 
+> Individual tasks are managed via separate GitHub Issues. 
+> DO NOT implement these features unless they are explicitly part of your CURRENTly assigned Issue.
+
+1. **Task Title** (#Issue-ID) - _Concise description. Vertical slice focus._
+2. **Task Title** (#Issue-ID) - _Concise description. Vertical slice focus._
+
 ## Further Notes
 
 Any further notes about the feature.
